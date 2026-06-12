@@ -25,12 +25,20 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (research data client)"}
 
 
 def parse_chart_json(data: dict[str, Any]) -> pd.DataFrame:
-    """Yahoo chart JSON -> [ts, open, high, low, close, volume] (tz-naive UTC dates)."""
-    empty = pd.DataFrame(columns=["ts", "open", "high", "low", "close", "volume"])
+    """Yahoo chart JSON -> [ts, open, high, low, close, volume, adj_close].
+
+    The `quote` arrays are SPLIT-adjusted only. `adjclose` is the total-return
+    (split + dividend) close — research must use it; ignoring it understates
+    high-yield names by their dividend yield and tilts cross-sectional ranks
+    (audit finding W-05). Both are kept: raw close for execution realism,
+    adj_close for research returns.
+    """
+    empty = pd.DataFrame(columns=["ts", "open", "high", "low", "close", "volume", "adj_close"])
     result = (data.get("chart", {}).get("result") or [None])[0]
     if not result or not result.get("timestamp"):
         return empty
     quote = result["indicators"]["quote"][0]
+    adjclose = (result["indicators"].get("adjclose") or [{}])[0].get("adjclose")
     df = pd.DataFrame({
         "ts": pd.to_datetime(result["timestamp"], unit="s", utc=True).tz_localize(None),
         "open": quote.get("open"),
@@ -38,11 +46,13 @@ def parse_chart_json(data: dict[str, Any]) -> pd.DataFrame:
         "low": quote.get("low"),
         "close": quote.get("close"),
         "volume": quote.get("volume"),
+        "adj_close": adjclose if adjclose is not None else float("nan"),
     })
     # daily bars are stamped at session open — normalize to the date so
     # symbols with different session times align on a common index
     df["ts"] = df["ts"].dt.normalize()
     df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0.0)
+    df["adj_close"] = pd.to_numeric(df["adj_close"], errors="coerce")
     return df.dropna(subset=["open", "high", "low", "close"]).reset_index(drop=True)
 
 

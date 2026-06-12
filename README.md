@@ -10,6 +10,16 @@ environment.
 > framework, not a money machine. **Live trading is disabled by default** and
 > stays off until every safety gate passes.
 
+> **⚠️ Audit notice (2026-06).** An institutional audit found that the headline
+> research numbers below are **in-sample, selection-inflated upper bounds** on
+> survivorship-biased, (pre-fix) dividend-blind data — see
+> [`AUDIT_REPORT.md`](AUDIT_REPORT.md), [`RESEARCH_WEAKNESSES.md`](RESEARCH_WEAKNESSES.md),
+> [`PRODUCTION_RISK_REGISTER.md`](PRODUCTION_RISK_REGISTER.md) and
+> [`STRATEGY_ACCEPTANCE_CRITERIA.md`](STRATEGY_ACCEPTANCE_CRITERIA.md).
+> Every strategy's honest validation stage lives in the alpha registry
+> (`statarb alpha-registry list`). Re-validated numbers will replace the
+> legacy figures as the new pipeline processes them.
+
 ---
 
 ## What is statistical arbitrage?
@@ -389,7 +399,10 @@ docker compose up dashboard                 # dashboard on :8000
 | Binance signed orders | ✅ testnet-first; LIVE blocked unless the gate grants it |
 | Trading 212 equities connector (official Public API, Basic auth) | ✅ demo-first; sell-qty convention flagged VERIFY |
 | Compliance checks (market hours, stale data) | ✅ (simplified US session; calendar lib later) |
-| Corporate-action adjustment (splits/dividends) | ✅ |
+| Corporate-action adjustment | ✅ splits (Yahoo server-side) + dividends via stored `adj_close`; re-run `download-data` to backfill older rows — see [`docs/data_quality.md`](docs/data_quality.md) |
+| Experiment tracking (`statarb experiments`; every research run = a counted trial) | ✅ |
+| Alpha registry with promotion gates (`statarb alpha-registry`) | ✅ live stages blocked pending governance |
+| Data audit with survivorship/adjustment verdicts (`statarb data-audit`) | ✅ |
 | **Trading 212 CFDs** | ❌ **unsupported by official API — will not be built** |
 | Binance futures / leverage / true shorting | ❌ off by default; spot cannot short |
 

@@ -45,6 +45,11 @@ class BarRow(Base):
     low: Mapped[float] = mapped_column(Float)
     close: Mapped[float] = mapped_column(Float)
     volume: Mapped[float] = mapped_column(Float)
+    # Total-return close (split AND dividend adjusted). Nullable: crypto and
+    # synthetic data have no corporate actions; equity rows downloaded before
+    # the adjustment fix have NULL until re-downloaded. Research must use it
+    # (see build_price_matrix(adjusted=True)); execution uses raw prices.
+    adj_close: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 class PairRow(Base):
@@ -170,6 +175,37 @@ class BacktestRunRow(Base):
     report_path: Mapped[str] = mapped_column(Text, default="")
     equity_json: Mapped[str] = mapped_column(Text, default="[]")   # downsampled [ts, value]
     trades_json: Mapped[str] = mapped_column(Text, default="[]")
+
+
+class ExperimentRow(Base):
+    """One research run. EVERY backtest/walk-forward/sweep entry point records
+    one of these — that is how trials get counted for multiple-testing
+    corrections and how any result can be traced to code + config + data."""
+
+    __tablename__ = "experiments"
+    __table_args__ = (Index("ix_experiments_family", "family"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    experiment_id: Mapped[str] = mapped_column(String(40), unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime)
+    kind: Mapped[str] = mapped_column(String(24))           # backtest | basket | ensemble | walk_forward | carry | sweep
+    strategy: Mapped[str] = mapped_column(String(64))
+    universe: Mapped[str] = mapped_column(String(64), default="")
+    interval: Mapped[str] = mapped_column(String(8), default="")
+    # trial family for multiple-testing accounting: every config evaluated to
+    # answer the same question shares a family (e.g. "xsmom_us_stocks_50_1d")
+    family: Mapped[str] = mapped_column(String(96), default="")
+    git_commit: Mapped[str] = mapped_column(String(48), default="")
+    git_dirty: Mapped[bool] = mapped_column(Boolean, default=False)
+    config_json: Mapped[str] = mapped_column(Text, default="{}")
+    config_hash: Mapped[str] = mapped_column(String(16), default="")
+    data_fingerprint: Mapped[str] = mapped_column(String(16), default="")
+    data_start: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    data_end: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    seed: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sample: Mapped[str] = mapped_column(String(16), default="in_sample")  # in_sample | oos | walk_forward | holdout
+    metrics_json: Mapped[str] = mapped_column(Text, default="{}")
+    notes: Mapped[str] = mapped_column(Text, default="")
 
 
 class AuditEventRow(Base):

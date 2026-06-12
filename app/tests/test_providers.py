@@ -16,9 +16,10 @@ def test_yahoo_chart_parsing():
         }]},
     }]}}
     df = parse_chart_json(payload)
-    assert list(df.columns) == ["ts", "open", "high", "low", "close", "volume"]
+    assert list(df.columns) == ["ts", "open", "high", "low", "close", "volume", "adj_close"]
     assert len(df) == 2
     assert df["volume"].iloc[1] == 0.0
+    assert df["adj_close"].isna().all()      # no adjclose block in this payload
     assert df["ts"].dt.hour.eq(0).all()      # normalized to dates
 
 

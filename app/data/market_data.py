@@ -25,6 +25,8 @@ class PriceMatrix:
     high: pd.DataFrame | None = None
     low: pd.DataFrame | None = None
     volume: pd.DataFrame | None = None
+    adjusted: bool = False                  # prices on a total-return basis?
+    adjustment_coverage: float = 0.0        # fraction of cells with adj data
 
     @property
     def symbols(self) -> list[str]:
@@ -52,7 +54,8 @@ class PriceMatrix:
 
         return PriceMatrix(self.close.iloc[start:end], self.open.iloc[start:end],
                            self.interval, high=cut(self.high), low=cut(self.low),
-                           volume=cut(self.volume))
+                           volume=cut(self.volume), adjusted=self.adjusted,
+                           adjustment_coverage=self.adjustment_coverage)
 
 
 def build_price_matrix(
@@ -64,11 +67,18 @@ def build_price_matrix(
     source: str | None = None,
     max_ffill: int = 3,
     min_rows: int = 100,
+    adjusted: bool = False,
 ) -> PriceMatrix:
     """Load bars and align all symbols onto a common timestamp index.
 
     Small gaps are forward-filled (up to `max_ffill` bars); symbols whose
     coverage is too short to align are rejected with DataQualityError.
+
+    `adjusted=True` rescales every price frame onto a TOTAL-RETURN basis using
+    the stored adj_close (split + dividend adjusted). Research on equities must
+    use this — raw closes understate high-yield names and tilt cross-sectional
+    ranks (audit W-05). Cells without adjustment data keep raw prices and the
+    shortfall is reported in `adjustment_coverage` (re-download fills it in).
     """
     long_df = storage.load_bars(symbols, interval, start=start, end=end, source=source)
     if long_df.empty:
@@ -103,9 +113,31 @@ def build_price_matrix(
     low = pivot("low").ffill(limit=max_ffill).reindex(aligned.index)
     volume = pivot("volume").ffill(limit=max_ffill).reindex(aligned.index)
 
+    coverage = 0.0
+    if adjusted:
+        adj = pd.DataFrame(index=aligned.index, columns=aligned.columns, dtype=float)
+        if long_df["adj_close"].notna().any():
+            adj = pivot("adj_close").ffill(limit=max_ffill).reindex(
+                index=aligned.index, columns=aligned.columns)
+        factor = (adj / aligned).where(adj.notna() & (aligned > 0))
+        coverage = float(factor.notna().to_numpy().mean())
+        if coverage < 1.0:
+            log.warning(
+                "adjustment coverage %.1f%% — cells without adj_close keep RAW "
+                "prices (re-run download-data to backfill dividend adjustment)",
+                100 * coverage,
+            )
+        factor = factor.fillna(1.0)
+        aligned = aligned * factor
+        open_ = open_ * factor
+        high = high * factor
+        low = low * factor
+
     log.info(
-        "price matrix: %d bars x %d symbols [%s .. %s]",
+        "price matrix: %d bars x %d symbols [%s .. %s]%s",
         len(aligned), aligned.shape[1], aligned.index[0], aligned.index[-1],
+        f" (total-return adjusted, coverage {100 * coverage:.1f}%)" if adjusted else "",
     )
     return PriceMatrix(close=aligned, open=open_, interval=interval,
-                       high=high, low=low, volume=volume)
+                       high=high, low=low, volume=volume,
+                       adjusted=adjusted, adjustment_coverage=coverage)

@@ -1,0 +1,237 @@
+# Alpha registry — managed by `statarb alpha-registry`; hand-edits allowed
+# but promotion history is append-only. See STRATEGY_ACCEPTANCE_CRITERIA.md.
+#
+# Seeded 2026-06-12 from the Phase-1 audit: every strategy placed at the
+# HONEST stage its evidence supports, not the stage its backtest implies.
+alphas:
+  flagship_daily_ensemble:
+    name: Flagship daily ensemble (xsmom + tsmom + momentum-neutral ml_alpha)
+    hypothesis: >-
+      Lowly-correlated return premia (cross-sectional momentum, time-series momentum,
+      ML residual forecasts) blended with inverse-vol allocation and a trailing
+      performance gate produce a smoother curve than any sleeve; the counterparties
+      are under-reactors to 6-12 month information and momentum-crash insurers.
+    asset_class: equity
+    universe: us_stocks_50
+    horizon: weeks-months
+    rebalance: daily
+    status: backtest
+    required_data: [us_stocks_50 1d total-return bars]
+    expected_capacity: unknown — no capacity analysis exists yet
+    expected_turnover: "~10-15x/yr (sleeve-dependent)"
+    known_risks:
+      - momentum crash (gate reacts with 20-60 day lag)
+      - single-window selection (audit W-01/W-02), survivorship-biased universe (W-04)
+      - dividend-blind data before re-download (W-05); frictionless shorts (W-07)
+    requires_short: true
+    requires_leverage: false
+    executable_venues: []   # T212 cannot short; Binance spot cannot short; futures not connected
+    experiment_ids: []
+    history:
+      - {ts: '2026-06-12T00:00:00+00:00', from: null, to: backtest,
+         by: audit, reason: 'README claims +48.5%/Sharpe 1.34 — single in-sample window;
+         no basket walk-forward or stress suite exists, so the evidence supports
+         backtest stage only (audit F1)'}
+    notes: >-
+      Headline numbers are in-sample, best-of-~50-trials, on survivorship-biased,
+      dividend-unadjusted data with same-close fills. Re-validate through the new
+      pipeline before citing any figure.
+
+  xsec_momentum_us:
+    name: 12-1 cross-sectional momentum (us_stocks_50)
+    hypothesis: >-
+      Jegadeesh-Titman relative momentum: investors under-react over 6-12 months;
+      premium persists because exploiting it risks momentum crashes.
+    asset_class: equity
+    universe: us_stocks_50
+    horizon: months
+    rebalance: daily (decile book, low effective churn)
+    status: backtest
+    required_data: [us_stocks_50 1d total-return bars]
+    expected_capacity: high for retail sizes on mega-caps
+    expected_turnover: moderate
+    known_risks: [momentum crash, survivorship bias amplifies this sleeve most]
+    requires_short: true
+    executable_venues: []
+    experiment_ids: []
+    history:
+      - {ts: '2026-06-12T00:00:00+00:00', from: null, to: backtest,
+         by: audit, reason: 'Sharpe 1.11 standalone, single window, in-sample'}
+
+  tsmom_us:
+    name: Time-series momentum 12m (us_stocks_50)
+    hypothesis: >-
+      Moskowitz-Ooi-Pedersen: an asset's own 12-month return predicts its next
+      month; rooted in slow capital flows and hedging demand.
+    asset_class: equity
+    universe: us_stocks_50
+    horizon: months
+    rebalance: daily
+    status: backtest
+    required_data: [us_stocks_50 1d total-return bars]
+    expected_capacity: high
+    expected_turnover: low-moderate
+    known_risks: [whipsaw in range-bound regimes, directional exposure (not neutral)]
+    requires_short: true
+    executable_venues: []
+    experiment_ids: []
+    history:
+      - {ts: '2026-06-12T00:00:00+00:00', from: null, to: backtest,
+         by: audit, reason: 'Sharpe 0.88 standalone, single window, in-sample'}
+
+  ml_alpha_neutral:
+    name: Momentum-neutral ML alpha (HistGBT on ranked features)
+    hypothesis: >-
+      Gradient-boosted trees on cross-sectionally ranked features forecast the
+      component of relative return orthogonal to 12-1 momentum — short-horizon
+      information diffusion that hand-built signals miss.
+    asset_class: equity
+    universe: us_stocks_50
+    horizon: 1 week
+    rebalance: daily with hold band (self-throttled to horizon)
+    status: backtest
+    required_data: [us_stocks_50 1d total-return bars]
+    expected_capacity: moderate (trades rank tails)
+    expected_turnover: "~129x window total documented"
+    known_risks:
+      - hyperparameters and hold band tuned on the reporting window (audit W-06)
+      - overlapping labels, no purged CV yet (W-08)
+      - model decay; feature drift unmonitored
+    requires_short: true
+    executable_venues: []
+    experiment_ids: []
+    history:
+      - {ts: '2026-06-12T00:00:00+00:00', from: null, to: backtest,
+         by: audit, reason: 'Sharpe 0.89 standalone in-sample; CV discipline absent'}
+
+  cointegration_pairs_us:
+    name: Cointegration pairs (US stocks, daily)
+    hypothesis: >-
+      Long-run equilibrium between close economic substitutes; deviations created
+      by uninformed flow revert as arbitrage capital responds.
+    asset_class: equity
+    universe: us_stocks_50
+    horizon: days-weeks
+    rebalance: signal-driven
+    status: walk_forward
+    required_data: [us_stocks_50 1d total-return bars]
+    expected_capacity: low-moderate (thin edge)
+    expected_turnover: low
+    known_risks: [model decay after selection, thin sample (4 OOS windows), costs eat the edge]
+    requires_short: true
+    executable_venues: []
+    experiment_ids: []
+    history:
+      - {ts: '2026-06-12T00:00:00+00:00', from: null, to: walk_forward,
+         by: audit, reason: 'the only strategy with genuine OOS evidence (WF OOS
+         Sharpe 0.88) — but only 4 windows; needs more history and a CI before stress'}
+
+  tsmom_crypto:
+    name: TSMOM (crypto 15m)
+    hypothesis: trend persistence in crypto driven by retail flow cascades
+    asset_class: crypto_spot
+    universe: crypto_top_10
+    horizon: days
+    rebalance: every 48 bars
+    status: backtest
+    required_data: [crypto_top_10 15m bars, '>= 2y for regime breadth']
+    expected_capacity: moderate
+    expected_turnover: high
+    known_risks: ['single 90-day window = one regime (audit W-14)', 15 bps cost sensitivity]
+    requires_short: true
+    executable_venues: []   # long-only variant would be executable on binance_spot
+    experiment_ids: []
+    history:
+      - {ts: '2026-06-12T00:00:00+00:00', from: null, to: backtest,
+         by: audit, reason: '+7.1% on one 90-day window; needs multi-regime history'}
+
+  funding_carry:
+    name: Funding-rate carry (long spot / short perp)
+    hypothesis: >-
+      Perp funding is paid by leveraged longs to shorts; persistent positive
+      funding is harvestable delta-neutral. Capacity-constrained by basis risk.
+    asset_class: crypto_futures
+    universe: crypto_top_10 perps
+    horizon: days-weeks
+    rebalance: 8h funding grid with hysteresis
+    status: research
+    required_data: [funding history, perp basis, margin schedule]
+    expected_capacity: moderate
+    expected_turnover: low (hysteresis)
+    known_risks:
+      - funding-leg-only model — basis, margin, liquidation unmodeled
+      - no futures venue connected; printed Sharpe meaningless (docs §6)
+    requires_short: true
+    requires_leverage: true
+    executable_venues: []
+    experiment_ids: []
+    history:
+      - {ts: '2026-06-12T00:00:00+00:00', from: null, to: research,
+         by: audit, reason: '+7%/2y funding leg only; not a backtest of the real trade yet'}
+
+  pca_stat_arb:
+    name: PCA residual stat-arb (Avellaneda-Lee)
+    hypothesis: residual reversion after stripping PCA factors
+    asset_class: multi
+    universe: crypto_top_10 / us_stocks_50/100
+    horizon: days
+    rebalance: daily
+    status: rejected
+    known_risks: [post-2007 decay documented by the original authors]
+    requires_short: true
+    executable_venues: []
+    experiment_ids: []
+    history:
+      - {ts: '2026-06-12T00:00:00+00:00', from: null, to: rejected,
+         by: audit, reason: 'negative on every tested configuration (crypto −15.9%;
+         us_stocks_100 −20 to −29%; us_stocks_50 −6.8%); funded spells cost the
+         ensemble ~8pp (docs §7d). Properly rejected — keep the record.'}
+
+  sector_stat_arb:
+    name: Sector-relative residual stat-arb
+    hypothesis: same as pca_stat_arb with leave-one-out sector factors
+    asset_class: equity
+    universe: us_stocks_50
+    horizon: days
+    rebalance: daily
+    status: rejected
+    requires_short: true
+    executable_venues: []
+    experiment_ids: []
+    history:
+      - {ts: '2026-06-12T00:00:00+00:00', from: null, to: rejected,
+         by: audit, reason: 'all variants negative (−13.8% to −24.7%); orthogonal
+         but losing diversifies nothing (docs §5)'}
+
+  xsec_reversion:
+    name: Short-term cross-sectional reversal
+    hypothesis: liquidity provision premium at days horizon (Lehmann 1990)
+    asset_class: multi
+    universe: crypto_top_10 / us_stocks_50
+    horizon: days
+    rebalance: daily
+    status: rejected
+    requires_short: true
+    executable_venues: []
+    experiment_ids: []
+    history:
+      - {ts: '2026-06-12T00:00:00+00:00', from: null, to: rejected,
+         by: audit, reason: 'all 24 swept configs negative net of costs at crypto
+         cost levels; structurally unviable at this breadth/cost point. Re-open only
+         with a materially different cost structure or universe.'}
+
+  kalman_pairs_crypto:
+    name: Kalman-filter pairs (crypto 15m)
+    hypothesis: adaptive hedge ratio tracks slowly drifting cointegration
+    asset_class: crypto_spot
+    universe: crypto_top_10
+    horizon: hours-days
+    rebalance: signal-driven
+    status: research
+    requires_short: true
+    executable_venues: []
+    experiment_ids: []
+    history:
+      - {ts: '2026-06-12T00:00:00+00:00', from: null, to: research,
+         by: audit, reason: 'contained at −2.3% by the drift gate on one window;
+         not yet evidence of edge'}

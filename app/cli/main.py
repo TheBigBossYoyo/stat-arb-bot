@@ -156,6 +156,54 @@ def _load_pairs(storage, universe: str, interval: str):
     ]
 
 
+def _default_adjusted(universe: str | None, interval: str) -> bool:
+    """Research on daily equity bars defaults to TOTAL-RETURN prices (audit
+    W-05). Crypto/synthetic have no corporate actions — raw is fine."""
+    if interval != "1d" or not universe:
+        return False
+    from app.data.universe import get_universe_meta
+
+    return get_universe_meta(universe).asset_class == "equity"
+
+
+def _record_experiment(storage, *, kind: str, strategy: str, universe: str = "",
+                       interval: str = "", config: dict | None = None,
+                       metrics: dict | None = None, prices=None,
+                       seed: int | None = None, sample: str = "in_sample",
+                       notes: str = "") -> None:
+    """Record the run in the experiment registry and tell the researcher its
+    trial number — that count is what deflates the family's best Sharpe."""
+    from app.research.experiment_tracking import ExperimentTracker
+
+    rec = ExperimentTracker(storage).record(
+        kind=kind, strategy=strategy, universe=universe, interval=interval,
+        config=config, metrics=metrics, prices=prices, seed=seed,
+        sample=sample, notes=notes,
+    )
+    dirty = " [yellow](DIRTY TREE — commit before citing this run)[/yellow]" if rec.git_dirty else ""
+    console.print(
+        f"[dim]experiment[/dim] {rec.experiment_id} [dim]| family[/dim] {rec.family} "
+        f"[dim]| trial[/dim] #{rec.trial_number}{dirty}"
+    )
+    if rec.trial_number >= 10:
+        console.print(
+            f"[yellow]{rec.trial_number} trials recorded in this family — the best "
+            f"Sharpe among them is inflated by selection; judge it deflated "
+            f"(see RESEARCH_WEAKNESSES.md W-02).[/yellow]"
+        )
+
+
+def _print_adjustment_status(prices, universe: str | None, interval: str) -> None:
+    if prices.adjusted:
+        note = "" if prices.adjustment_coverage >= 0.99 else (
+            f" [yellow](coverage {100 * prices.adjustment_coverage:.1f}% — re-run "
+            f"download-data to backfill adj_close)[/yellow]")
+        console.print(f"[dim]prices: total-return adjusted[/dim]{note}")
+    elif _default_adjusted(universe, interval):
+        console.print("[yellow]prices: RAW (dividend-blind) — pass --adjusted or "
+                      "re-download data; see audit W-05[/yellow]")
+
+
 # --------------------------------------------------------------------------------
 # commands
 # --------------------------------------------------------------------------------
@@ -265,6 +313,9 @@ def backtest(
         None, "--bars-per-year",
         help="annualization override: ~252 for daily equity/FX bars (default: 24/7 crypto)",
     ),
+    adjusted: bool | None = typer.Option(
+        None, "--adjusted/--raw",
+        help="total-return prices (default: adjusted for daily equity universes)"),
 ) -> None:
     """Backtest a strategy on the saved pairs (event-driven, costs included)."""
     settings, storage = _bootstrap()
@@ -280,7 +331,10 @@ def backtest(
 
     symbols = sorted({s for p in pairs for s in (p.symbol_a, p.symbol_b)})
     start = (utc_now() - timedelta(days=days)).replace(tzinfo=None) if days else None
-    prices = build_price_matrix(storage, symbols, interval, start=start)
+    use_adjusted = adjusted if adjusted is not None else _default_adjusted(universe, interval)
+    prices = build_price_matrix(storage, symbols, interval, start=start,
+                                adjusted=use_adjusted)
+    _print_adjustment_status(prices, universe, interval)
 
     defaults = _strategy_defaults(interval)
     bt_raw = defaults.get("backtest", {})
@@ -338,6 +392,13 @@ def backtest(
         start_ts=prices.index[0], end_ts=prices.index[-1],
         params=bt_config.__dict__, metrics=result.metrics, report_path=str(report_path),
         equity_points=equity_points, trades=trade_dicts,
+    )
+    _record_experiment(
+        storage, kind="backtest", strategy=strategy, universe=universe,
+        interval=interval, metrics=result.metrics, prices=prices,
+        config={**{k: v for k, v in bt_config.__dict__.items()
+                   if k != "per_pair_target_pct"},
+                "adjusted": use_adjusted, "n_pairs": len(pairs)},
     )
 
     table = Table(title=f"Backtest metrics - {strategy}")
@@ -432,6 +493,9 @@ def backtest_basket(
     interval: str = typer.Option(DEFAULT_INTERVAL),
     long_only: bool = typer.Option(False, help="long-only rotation (NOT market-neutral)"),
     rebalance_every: int | None = typer.Option(None, help="bars between rebalances"),
+    adjusted: bool | None = typer.Option(
+        None, "--adjusted/--raw",
+        help="total-return prices (default: adjusted for daily equity universes)"),
 ) -> None:
     """Backtest a cross-sectional basket strategy (PCA residuals, reversal, momentum)."""
     settings, storage = _bootstrap()
@@ -443,7 +507,10 @@ def backtest_basket(
     basket_raw = defaults.get("basket", {}) or {}
     weight_fn = _basket_weight_fn(strategy, defaults, long_only, universe)
 
-    prices = build_price_matrix(storage, get_universe(universe), interval)
+    use_adjusted = adjusted if adjusted is not None else _default_adjusted(universe, interval)
+    prices = build_price_matrix(storage, get_universe(universe), interval,
+                                adjusted=use_adjusted)
+    _print_adjustment_status(prices, universe, interval)
     config = BasketConfig(
         interval=interval,
         fit_window=int(basket_raw.get("fit_window", 1500)),
@@ -460,6 +527,12 @@ def backtest_basket(
         strategy=f"basket_{strategy}{'_long_only' if long_only else ''}", interval=interval,
         start_ts=prices.index[0], end_ts=prices.index[-1],
         params={**basket_raw, "long_only": long_only}, metrics=result.metrics,
+    )
+    _record_experiment(
+        storage, kind="basket", strategy=strategy, universe=universe,
+        interval=interval, metrics=result.metrics, prices=prices,
+        config={**basket_raw, "long_only": long_only, "adjusted": use_adjusted,
+                "rebalance_every": config.rebalance_every},
     )
     table = Table(title=f"Basket metrics - {strategy}")
     table.add_column("metric")
@@ -515,6 +588,9 @@ def backtest_ensemble(
     leverage: float = typer.Option(
         1.0, help="multiply the whole book; margin/borrow costs NOT modeled "
                   "— research only"),
+    adjusted: bool | None = typer.Option(
+        None, "--adjusted/--raw",
+        help="total-return prices (default: adjusted for daily equity universes)"),
 ) -> None:
     """Backtest a risk-parity ensemble of basket strategies (multi-strat style).
 
@@ -532,7 +608,10 @@ def backtest_ensemble(
     reb_every = rebalance_every or int(basket_raw.get("rebalance_every", 24))
     names, ensemble = _build_ensemble(sleeves, defaults, long_only, universe,
                                       interval, leverage, reb_every)
-    prices = build_price_matrix(storage, get_universe(universe), interval)
+    use_adjusted = adjusted if adjusted is not None else _default_adjusted(universe, interval)
+    prices = build_price_matrix(storage, get_universe(universe), interval,
+                                adjusted=use_adjusted)
+    _print_adjustment_status(prices, universe, interval)
     config = BasketConfig(
         interval=interval,
         fit_window=int(basket_raw.get("fit_window", 1500)),
@@ -549,6 +628,13 @@ def backtest_ensemble(
         strategy=f"ensemble_{'_'.join(names)}{'_long_only' if long_only else ''}",
         interval=interval, start_ts=prices.index[0], end_ts=prices.index[-1],
         params={**ens_raw, "sleeves": names, "long_only": long_only}, metrics=result.metrics,
+    )
+    _record_experiment(
+        storage, kind="ensemble", strategy=f"ensemble_{'_'.join(sorted(names))}",
+        universe=universe, interval=interval, metrics=result.metrics, prices=prices,
+        config={**ens_raw, "sleeves": names, "long_only": long_only,
+                "leverage": leverage, "adjusted": use_adjusted,
+                "rebalance_every": reb_every},
     )
     table = Table(title="Ensemble metrics")
     table.add_column("metric")
@@ -667,6 +753,14 @@ def carry_backtest(
                 "exit_apr": exit_apr, "symbols": list(panels)},
         metrics=result.metrics,
     )
+    _record_experiment(
+        storage, kind="carry", strategy="funding_carry", universe=universe,
+        interval="8h", metrics=result.metrics,
+        config={"top_k": top_k, "lookback_periods": lookback_periods,
+                "cost_bps": cost_bps, "entry_apr": entry_apr,
+                "exit_apr": exit_apr, "symbols": list(panels)},
+        notes="funding leg only — basis/margin/liquidation unmodeled",
+    )
     table = Table(title="Funding-carry metrics (funding leg only)")
     table.add_column("metric")
     table.add_column("value", justify="right")
@@ -684,6 +778,9 @@ def walk_forward(
     interval: str = typer.Option(DEFAULT_INTERVAL),
     train_bars: int | None = typer.Option(None),
     test_bars: int | None = typer.Option(None),
+    adjusted: bool | None = typer.Option(
+        None, "--adjusted/--raw",
+        help="total-return prices (default: adjusted for daily equity universes)"),
 ) -> None:
     """Walk-forward validation: select pairs in-sample, trade out-of-sample."""
     settings, storage = _bootstrap()
@@ -714,7 +811,10 @@ def walk_forward(
         target_spread_vol=float(bt_raw.get("target_spread_vol", 0)),
     )
 
-    prices = build_price_matrix(storage, get_universe(universe), interval)
+    use_adjusted = adjusted if adjusted is not None else _default_adjusted(universe, interval)
+    prices = build_price_matrix(storage, get_universe(universe), interval,
+                                adjusted=use_adjusted)
+    _print_adjustment_status(prices, universe, interval)
     console.print(f"Walk-forward: {len(prices.index)} bars available")
     wf = run_walk_forward(
         prices,
@@ -731,6 +831,13 @@ def walk_forward(
 
     report_path = render_walk_forward_report(wf, strategy_name=strategy,
                                              out_dir=settings.reports_dir)
+    _record_experiment(
+        storage, kind="walk_forward", strategy=strategy, universe=universe,
+        interval=interval, metrics=wf.summary, prices=prices, sample="walk_forward",
+        config={"train_bars": train_bars or int(wf_raw.get("train_bars", 4000)),
+                "test_bars": test_bars or int(wf_raw.get("test_bars", 1000)),
+                "adjusted": use_adjusted},
+    )
     table = Table(title="Walk-forward summary")
     table.add_column("metric")
     table.add_column("value", justify="right")
@@ -881,6 +988,197 @@ def report(last_backtest: bool = typer.Option(True, "--last-backtest/--all")) ->
     console.print(table)
     if run.report_path:
         console.print(f"[green]Full report:[/green] {run.report_path}")
+
+
+@app.command("data-audit")
+def data_audit(
+    universe: str = typer.Option("us_stocks_50"),
+    interval: str = typer.Option("1d"),
+    source: str | None = typer.Option(None, help="restrict to one bar source"),
+    symbols: str | None = typer.Option(None, help="comma-separated symbols (overrides universe)"),
+) -> None:
+    """Audit stored data for a universe: coverage, gaps, staleness, outliers,
+    dividend-adjustment coverage, survivorship status — with an honest verdict."""
+    settings, storage = _bootstrap()
+    from app.data.data_audit import audit_universe
+
+    names = ([s.strip().upper() for s in symbols.split(",") if s.strip()]
+             if symbols else None)
+    rep = audit_universe(storage, universe, interval, source=source, symbols=names)
+
+    color = {"ok": "green", "research_only": "yellow", "not_acceptable": "red"}[rep.verdict]
+    console.print(f"\n[bold]Data audit — {universe} ({interval})[/bold]")
+    console.print(f"survivorship: [bold]{rep.survivorship}[/bold] — {rep.survivorship_note}")
+    console.print(f"aligned window: {rep.aligned_start} → {rep.aligned_end} "
+                  f"(alignment loss {rep.alignment_loss_pct:.1f}%)")
+    console.print(f"dividend-adjustment coverage: {rep.adj_coverage_pct:.1f}%")
+    console.print(f"verdict: [{color}][bold]{rep.verdict.upper()}[/bold][/{color}]")
+    for reason in rep.verdict_reasons:
+        console.print(f"  - {reason}")
+    flagged = [a for a in rep.symbols if a.issues]
+    if flagged:
+        table = Table(title=f"{len(flagged)} symbols with issues")
+        table.add_column("symbol")
+        table.add_column("issues")
+        for a in flagged:
+            table.add_row(a.symbol, "; ".join(a.issues))
+        console.print(table)
+    out = settings.reports_dir / f"data_audit_{universe}_{interval}.md"
+    out.write_text(rep.to_markdown(), encoding="utf-8")
+    console.print(f"[green]Report:[/green] {out}")
+    if rep.verdict == "not_acceptable":
+        raise typer.Exit(1)
+
+
+@app.command("data-coverage")
+def data_coverage(
+    universe: str = typer.Option("us_stocks_50"),
+    interval: str = typer.Option("1d"),
+) -> None:
+    """Per-symbol stored-bar coverage for a universe."""
+    _, storage = _bootstrap()
+    from app.data.universe import get_universe
+
+    table = Table(title=f"Coverage — {universe} ({interval})")
+    for col in ("symbol", "rows", "first", "last"):
+        table.add_column(col)
+    for symbol in get_universe(universe):
+        lo, hi, n = storage.bar_coverage(symbol, interval)
+        table.add_row(symbol, str(n), str(lo or "—"), str(hi or "—"))
+    console.print(table)
+
+
+@app.command("experiments")
+def experiments(
+    family: str | None = typer.Option(None, help="filter by trial family"),
+    strategy: str | None = typer.Option(None),
+    limit: int = typer.Option(30),
+) -> None:
+    """List recorded experiments (every research run is a counted trial)."""
+    _, storage = _bootstrap()
+    rows = storage.list_experiments(family=family, strategy=strategy, limit=limit)
+    if not rows:
+        console.print("[yellow]No experiments recorded yet.[/yellow]")
+        return
+    table = Table(title="Experiments (newest first)")
+    for col in ("id", "created", "kind", "family", "sample", "sharpe", "ret%", "git", "trial info"):
+        table.add_column(col)
+    for r in rows:
+        m = json.loads(r.metrics_json or "{}")
+        n_trials = storage.count_experiment_trials(r.family) if r.family else 0
+        table.add_row(
+            r.experiment_id, f"{r.created_at:%m-%d %H:%M}", r.kind, r.family, r.sample,
+            str(m.get("sharpe", m.get("oos_sharpe_mean", "—"))),
+            str(m.get("total_return_pct", m.get("oos_total_return_pct", "—"))),
+            (r.git_commit[:7] + ("*" if r.git_dirty else "")) or "—",
+            f"family has {n_trials} trials",
+        )
+    console.print(table)
+    console.print("[dim]* = dirty working tree. Best-of-family Sharpe is inflated "
+                  "by the family's trial count (W-02).[/dim]")
+
+
+registry_app = typer.Typer(no_args_is_help=True, help="Alpha registry: list, promote, reject, retire.")
+app.add_typer(registry_app, name="alpha-registry")
+
+
+@registry_app.command("list")
+def registry_list(status: str | None = typer.Option(None)) -> None:
+    """All alphas with status, venues and last transition."""
+    from app.research.alpha_registry import AlphaRegistry
+
+    table = Table(title="Alpha registry")
+    for col in ("id", "status", "asset class", "short?", "venues", "last transition"):
+        table.add_column(col)
+    for a in AlphaRegistry().list(status=status):
+        last = a.history[-1] if a.history else {}
+        color = {"rejected": "red", "retired": "dim",
+                 "paper": "cyan"}.get(a.status, "yellow" if a.status in
+                                      ("idea", "research") else "green")
+        table.add_row(
+            a.alpha_id, f"[{color}]{a.status}[/{color}]", a.asset_class,
+            "yes" if a.requires_short else "no",
+            ", ".join(a.executable_venues) or "[red]none[/red]",
+            f"{last.get('ts', '')[:10]} {last.get('reason', '')[:60]}",
+        )
+    console.print(table)
+
+
+@registry_app.command("show")
+def registry_show(alpha_id: str = typer.Argument(...)) -> None:
+    """Full record for one alpha, including promotion history."""
+    from app.research.alpha_registry import AlphaRegistry, RegistryError
+
+    try:
+        a = AlphaRegistry().get(alpha_id)
+    except RegistryError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    console.print(f"[bold]{a.name}[/bold]  (status: {a.status})")
+    console.print(f"hypothesis: {a.hypothesis}")
+    console.print(f"universe: {a.universe}  horizon: {a.horizon}  rebalance: {a.rebalance}")
+    console.print(f"requires_short={a.requires_short} requires_leverage={a.requires_leverage} "
+                  f"venues={a.executable_venues or 'NONE'}")
+    if a.known_risks:
+        console.print("known risks: " + "; ".join(a.known_risks))
+    if a.experiment_ids:
+        console.print(f"experiments: {', '.join(a.experiment_ids[-10:])}")
+    table = Table(title="History")
+    for col in ("ts", "from", "to", "by", "reason"):
+        table.add_column(col)
+    for h in a.history:
+        table.add_row(str(h.get("ts", ""))[:19], str(h.get("from")), h.get("to", ""),
+                      h.get("by", ""), h.get("reason", ""))
+    console.print(table)
+
+
+@registry_app.command("promote")
+def registry_promote(
+    alpha_id: str = typer.Argument(...),
+    to: str = typer.Option(..., "--to"),
+    reason: str = typer.Option("", help="required: cite experiment IDs"),
+) -> None:
+    """Promote one stage forward (live stages are blocked until governance gates exist)."""
+    from app.research.alpha_registry import AlphaRegistry, RegistryError
+
+    try:
+        a = AlphaRegistry().promote(alpha_id, to, reason=reason)
+        console.print(f"[green]{alpha_id} -> {a.status}[/green]")
+    except RegistryError as exc:
+        console.print(f"[red]REFUSED:[/red] {exc}")
+        raise typer.Exit(1) from exc
+
+
+@registry_app.command("reject")
+def registry_reject(
+    alpha_id: str = typer.Argument(...),
+    reason: str = typer.Option(..., help="why this alpha is rejected"),
+) -> None:
+    """Reject an alpha (terminal; the record is kept on purpose)."""
+    from app.research.alpha_registry import AlphaRegistry, RegistryError
+
+    try:
+        AlphaRegistry().reject(alpha_id, reason=reason)
+        console.print(f"[red]{alpha_id} rejected[/red]: {reason}")
+    except RegistryError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+
+
+@registry_app.command("retire")
+def registry_retire(
+    alpha_id: str = typer.Argument(...),
+    reason: str = typer.Option(..., help="why this alpha is retired"),
+) -> None:
+    """Retire an alpha (terminal)."""
+    from app.research.alpha_registry import AlphaRegistry, RegistryError
+
+    try:
+        AlphaRegistry().retire(alpha_id, reason=reason)
+        console.print(f"[dim]{alpha_id} retired[/dim]: {reason}")
+    except RegistryError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
 
 
 @app.command("dashboard")

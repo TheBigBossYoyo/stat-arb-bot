@@ -36,7 +36,7 @@ class BinanceFundingRates:
             params = {"symbol": symbol, "startTime": start_ms, "endTime": end_ms,
                       "limit": PAGE_LIMIT}
             response = request_with_retries(
-                lambda: self._client.get(FUNDING_URL, params=params)
+                lambda p=params: self._client.get(FUNDING_URL, params=p)
             )
             if response.status_code != 200:
                 raise BrokerError(

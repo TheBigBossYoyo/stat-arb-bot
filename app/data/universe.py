@@ -7,7 +7,20 @@ live exchange info is available.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from app.core.exceptions import ConfigurationError
+
+
+@dataclass(frozen=True)
+class UniverseMeta:
+    """Bias/tradability metadata. Every research artifact must surface
+    `survivorship` — a backtest on a `static_survivor` universe is a
+    viability sketch, not evidence (audit W-04)."""
+
+    asset_class: str                    # equity | crypto_spot | fx | synthetic
+    survivorship: str                   # point_in_time | static_survivor | not_applicable
+    selection_note: str = ""
 
 UNIVERSES: dict[str, list[str]] = {
     "crypto_top_10": [
@@ -67,6 +80,25 @@ UNIVERSES["us_stocks_100"] = UNIVERSES["us_stocks_50"] + [
     "RTX", "LMT", "UNP", "CSX", "FDX", "EMR", "MMM", "SLB", "EOG", "NEE",
 ]
 
+UNIVERSE_META: dict[str, UniverseMeta] = {
+    "crypto_top_10": UniverseMeta(
+        "crypto_spot", "static_survivor",
+        "today's top-10 by cap/liquidity; coins that died out of the top 10 are absent"),
+    "crypto_majors": UniverseMeta("crypto_spot", "static_survivor",
+                                  "hand-picked current majors"),
+    "synthetic_demo": UniverseMeta("synthetic", "not_applicable", "generated data"),
+    "us_stocks_demo": UniverseMeta("equity", "static_survivor",
+                                   "hand-picked classic pairs, chosen today"),
+    "us_stocks_50": UniverseMeta(
+        "equity", "static_survivor",
+        "2026 mega-caps backtested into the past; the worst case for momentum bias"),
+    "us_stocks_100": UniverseMeta(
+        "equity", "static_survivor",
+        "us_stocks_50 plus 50 long-listed large caps, still selected today"),
+    "fx_majors": UniverseMeta("fx", "not_applicable",
+                              "major FX pairs do not delist; research only"),
+}
+
 STABLECOINS = {"USDT", "USDC", "FDUSD", "TUSD", "DAI", "BUSD"}
 
 # Sector map for the US stock universes (sector-relative residual stat-arb).
@@ -117,6 +149,15 @@ def get_universe(name: str) -> list[str]:
         return list(UNIVERSES[name])
     except KeyError as exc:
         raise ConfigurationError(f"unknown universe {name!r}; choose from {list(UNIVERSES)}") from exc
+
+
+def get_universe_meta(name: str) -> UniverseMeta:
+    """Metadata for a universe; ad-hoc symbol lists are treated as
+    survivor-selected (the researcher chose them knowing the present)."""
+    return UNIVERSE_META.get(
+        name,
+        UniverseMeta("unknown", "static_survivor", "ad-hoc symbol list, chosen today"),
+    )
 
 
 def get_sectors(universe: str) -> dict[str, str]:

@@ -19,6 +19,7 @@ from app.data.schemas import (
     BarRow,
     Base,
     EquitySnapshotRow,
+    ExperimentRow,
     OrderRow,
     PairRow,
     SignalRow,
@@ -52,6 +53,7 @@ class Storage:
         Base.metadata.create_all(self.engine)
         self._ensure_columns("backtest_runs", {"equity_json": "TEXT DEFAULT '[]'",
                                                "trades_json": "TEXT DEFAULT '[]'"})
+        self._ensure_columns("bars", {"adj_close": "FLOAT"})
         log.info("database initialised", extra={"url": self.database_url})
 
     def _ensure_columns(self, table: str, columns: dict[str, str]) -> None:
@@ -74,6 +76,7 @@ class Storage:
         """Insert bars, ignoring duplicates on (source, symbol, interval, ts)."""
         if df.empty:
             return 0
+        adj = df["adj_close"] if "adj_close" in df.columns else None
         records = [
             {
                 "source": source,
@@ -85,10 +88,12 @@ class Storage:
                 "low": float(row.low),
                 "close": float(row.close),
                 "volume": float(row.volume),
+                "adj_close": (None if adj is None or pd.isna(adj.iloc[i]) else float(adj.iloc[i])),
             }
-            for row in df[BAR_COLUMNS].itertuples(index=False)
+            for i, row in enumerate(df[BAR_COLUMNS].itertuples(index=False))
         ]
         chunk_size = 500  # keep well under SQLite's bound-parameter limit
+        has_adj = any(r["adj_close"] is not None for r in records)
         inserted = 0
         with self.session() as s:
             if self.engine.dialect.name == "sqlite":
@@ -96,9 +101,20 @@ class Storage:
 
                 for start in range(0, len(records), chunk_size):
                     chunk = records[start : start + chunk_size]
-                    stmt = sqlite_insert(BarRow).values(chunk).on_conflict_do_nothing(
-                        index_elements=["source", "symbol", "interval", "ts"]
-                    )
+                    stmt = sqlite_insert(BarRow).values(chunk)
+                    if has_adj:
+                        # adj_close is a moving series (every new dividend
+                        # re-cascades the back-adjustment), so it updates on
+                        # conflict. Raw OHLCV stays immutable — provider
+                        # restatements must not silently rewrite research data.
+                        stmt = stmt.on_conflict_do_update(
+                            index_elements=["source", "symbol", "interval", "ts"],
+                            set_={"adj_close": stmt.excluded.adj_close},
+                        )
+                    else:
+                        stmt = stmt.on_conflict_do_nothing(
+                            index_elements=["source", "symbol", "interval", "ts"]
+                        )
                     result = s.execute(stmt)
                     inserted += result.rowcount if result.rowcount is not None else len(chunk)
             else:  # generic path: filter out existing timestamps first
@@ -115,6 +131,15 @@ class Storage:
                 for start in range(0, len(fresh), chunk_size):
                     s.bulk_insert_mappings(BarRow, fresh[start : start + chunk_size])
                 inserted = len(fresh)
+                if has_adj:
+                    stale = [r for r in records if r["ts"] in existing]
+                    for r in stale:
+                        s.execute(
+                            update(BarRow)
+                            .where(BarRow.source == source, BarRow.symbol == symbol,
+                                   BarRow.interval == interval, BarRow.ts == r["ts"])
+                            .values(adj_close=r["adj_close"])
+                        )
             s.commit()
         return inserted
 
@@ -126,9 +151,10 @@ class Storage:
         end: datetime | None = None,
         source: str | None = None,
     ) -> pd.DataFrame:
-        """Long-format bars: columns [symbol, ts, open, high, low, close, volume]."""
+        """Long-format bars: columns [symbol, ts, open, high, low, close, volume, adj_close]."""
         stmt = select(
-            BarRow.symbol, BarRow.ts, BarRow.open, BarRow.high, BarRow.low, BarRow.close, BarRow.volume
+            BarRow.symbol, BarRow.ts, BarRow.open, BarRow.high, BarRow.low, BarRow.close,
+            BarRow.volume, BarRow.adj_close,
         ).where(BarRow.symbol.in_(list(symbols)), BarRow.interval == interval)
         if source:
             stmt = stmt.where(BarRow.source == source)
@@ -139,7 +165,7 @@ class Storage:
         stmt = stmt.order_by(BarRow.symbol, BarRow.ts)
         with self.session() as s:
             rows = s.execute(stmt).all()
-        return pd.DataFrame(rows, columns=["symbol", *BAR_COLUMNS])
+        return pd.DataFrame(rows, columns=["symbol", *BAR_COLUMNS, "adj_close"])
 
     def bar_coverage(self, symbol: str, interval: str) -> tuple[datetime | None, datetime | None, int]:
         from sqlalchemy import func
@@ -292,6 +318,55 @@ class Storage:
     def get_backtest_run(self, run_id: int) -> BacktestRunRow | None:
         with self.session() as s:
             return s.get(BacktestRunRow, run_id)
+
+    # -- experiments ----------------------------------------------------------------
+
+    def record_experiment(self, **kwargs: Any) -> int:
+        for key in ("config_json", "metrics_json"):
+            if key in kwargs and not isinstance(kwargs[key], str):
+                kwargs[key] = json.dumps(kwargs[key], default=str)
+        with self.session() as s:
+            row = ExperimentRow(**kwargs)
+            s.add(row)
+            s.commit()
+            return row.id
+
+    def list_experiments(self, family: str | None = None, strategy: str | None = None,
+                         limit: int = 200) -> list[ExperimentRow]:
+        stmt = select(ExperimentRow).order_by(desc(ExperimentRow.created_at)).limit(limit)
+        if family:
+            stmt = stmt.where(ExperimentRow.family == family)
+        if strategy:
+            stmt = stmt.where(ExperimentRow.strategy == strategy)
+        with self.session() as s:
+            return list(s.execute(stmt).scalars())
+
+    def get_experiment(self, experiment_id: str) -> ExperimentRow | None:
+        with self.session() as s:
+            return s.execute(
+                select(ExperimentRow).where(ExperimentRow.experiment_id == experiment_id)
+            ).scalar_one_or_none()
+
+    def count_experiment_trials(self, family: str) -> int:
+        """Trial count for multiple-testing corrections (deflated Sharpe, FDR)."""
+        from sqlalchemy import func
+
+        with self.session() as s:
+            return int(s.execute(
+                select(func.count(ExperimentRow.id)).where(ExperimentRow.family == family)
+            ).scalar_one())
+
+    def experiment_family_sharpes(self, family: str) -> list[float]:
+        """All recorded Sharpe ratios in a trial family (deflated-Sharpe input)."""
+        sharpes: list[float] = []
+        for row in self.list_experiments(family=family, limit=10_000):
+            try:
+                value = json.loads(row.metrics_json).get("sharpe")
+            except (TypeError, ValueError):
+                value = None
+            if isinstance(value, (int, float)):
+                sharpes.append(float(value))
+        return sharpes
 
     # -- dashboard audit trail ------------------------------------------------------
 
