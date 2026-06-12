@@ -1,0 +1,3 @@
+2026-06-11 13:28:56,395 INFO    app.data.storage: database initialised
+2026-06-11 13:28:59,666 INFO    app.execution.paper_trader: paper trading started: 5 pairs, interval 15m, poll 225s — NO REAL ORDERS
+2026-06-11 13:29:02,326 INFO    app.execution.paper_trader: bar 2026-06-11 12:00:00 | equity 10000.00 | open pairs 0 | kill=False

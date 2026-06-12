@@ -1,0 +1,32 @@
+2026-06-12 15:18:44,708 INFO    app.data.market_data: price matrix: 1255 bars x 50 symbols [2021-06-14 00:00:00 .. 2026-06-11 00:00:00]
+Ensemble backtest: xsec_momentum + tsmom + ml_alpha on 50 assets, 1255 bars...
+           Ensemble metrics           
++------------------------------------+
+| metric                 |     value |
+|------------------------+-----------|
+| bars                   |       955 |
+| years                  |      3.79 |
+| total_return_pct       |    94.715 |
+| cagr_pct               |    19.224 |
+| ann_vol_pct            |    12.798 |
+| sharpe                 |      1.44 |
+| sortino                |     1.993 |
+| calmar                 |     1.925 |
+| max_drawdown_pct       |    -9.985 |
+| worst_day_pct          |    -3.539 |
+| n_trades               |         0 |
+| win_rate_pct           |      None |
+| profit_factor          |      None |
+| avg_trade_pnl          |      None |
+| median_trade_pnl       |      None |
+| worst_trade_pnl        |      None |
+| best_trade_pnl         |      None |
+| avg_holding_bars       |      None |
+| total_fees             | 2283.1363 |
+| turnover               |   309.421 |
+| avg_gross_exposure_pct |    139.63 |
+| final_equity           |  19471.54 |
++------------------------------------+
+Final sleeve risk shares: {'xsec_momentum': 0.142, 'tsmom': 0.51, 'ml_alpha': 0.348}
+- Costs: 5.0bps per unit turnover; rebalance every 1 bars.
+- Weights decided at bar t earn the t->t+1 return (no lookahead).

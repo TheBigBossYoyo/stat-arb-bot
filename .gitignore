@@ -1,0 +1,48 @@
+# Secrets — never commit
+.env
+*.env
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Runtime artifacts
+*.db
+*.sqlite
+logs/*.log
+logs/*.jsonl
+runtime/kill_switch.flag
+reports/*.md
+reports/*.html
+data_store/*.parquet
+
+# Keep directory markers
+!logs/.gitkeep
+!reports/.gitkeep
+!runtime/.gitkeep
+!data_store/.gitkeep
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Runtime state
+runtime/paused_strategies.json
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

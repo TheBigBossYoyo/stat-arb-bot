@@ -1,0 +1,5 @@
+seed= 7 vol_win=60: return=  40.66%  sharpe= 1.32  maxDD=  -7.29%  end_alloc={'pca': 0.0, 'xsmom': 0.14, 'tsmom': 0.51, 'ml': 0.35}
+seed= 1 vol_win=60: return=  40.66%  sharpe= 1.32  maxDD=  -7.29%  end_alloc={'pca': 0.0, 'xsmom': 0.14, 'tsmom': 0.51, 'ml': 0.35}
+seed=42 vol_win=60: return=  40.66%  sharpe= 1.32  maxDD=  -7.29%  end_alloc={'pca': 0.0, 'xsmom': 0.14, 'tsmom': 0.51, 'ml': 0.35}
+seed= 7 vol_win=40: return=  32.22%  sharpe= 1.13  maxDD=  -8.57%  end_alloc={'pca': 0.0, 'xsmom': 0.15, 'tsmom': 0.52, 'ml': 0.33}
+seed= 7 vol_win=80: return=  42.56%  sharpe= 1.38  maxDD= -11.10%  end_alloc={'pca': 0.0, 'xsmom': 0.14, 'tsmom': 0.5, 'ml': 0.35}

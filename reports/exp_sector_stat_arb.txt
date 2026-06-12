@@ -1,0 +1,16 @@
+--- standalone ---
+flat pca (reference)                       return=  -6.79%  sharpe=-0.18  maxDD= -21.50%  fees=$  1350
+sector, defaults (hl=20)                   return= -13.82%  sharpe=-0.41  maxDD= -15.50%  fees=$  1212
+sector, hl=10                              return= -24.70%  sharpe=-0.75  maxDD= -26.63%  fees=$  1610
+sector, s_entry=1.5                        return= -13.81%  sharpe=-0.33  maxDD= -25.95%  fees=$  1231
+sector, top_k=5                            return= -20.69%  sharpe=-0.58  maxDD= -23.52%  fees=$  1034
+xsec_momentum (reference)                  return=  92.86%  sharpe= 1.11  maxDD= -24.37%  fees=$   664
+
+correlations of daily sleeve returns:
+  sector vs flat pca        +0.464
+  sector vs xsec_momentum   +0.003
+
+--- ensembles ---
+4-sleeve flagship (pca+xsmom+tsmom+ml)     return=  40.66%  sharpe= 1.32  maxDD=  -7.29%  fees=$  1341
+4-sleeve, sector replaces pca              return=  32.99%  sharpe= 1.13  maxDD=  -7.15%  fees=$  1256
+5-sleeve (both pca and sector)             return=  29.48%  sharpe= 1.17  maxDD=  -7.29%  fees=$  1346

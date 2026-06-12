@@ -1,0 +1,53 @@
+# Central risk limits. Values in the `global` section can be overridden by
+# environment variables of the same (upper-cased) name. Every signal must pass
+# the RiskManager before it can become an order.
+#
+# Sizing limits come in two flavours:
+#   *_pct      — percent of CURRENT equity (primary; scales with the account)
+#   absolute   — hard dollar backstops (secondary; catch fat-finger configs)
+# The effective limit is min(absolute, pct/100 * equity); pct 0 disables the
+# percent leg. Keep the absolute backstops far above the pct-derived values
+# for the account size you actually run, or they silently throttle sizing —
+# exactly the bug that once capped a $10k account at $50/leg (0.9% gross).
+
+global:
+  max_daily_loss_pct: 2.0
+  max_total_drawdown_pct: 10.0
+  max_gross_exposure: 1000000         # absolute backstop (quote currency)
+  max_gross_exposure_pct: 150         # market-neutral book may exceed 100% gross
+  max_net_exposure: 100000
+  max_net_exposure_pct: 25
+  max_open_positions: 24
+  max_open_pairs: 10
+  max_trades_per_day: 100
+  max_notional_per_trade: 100000      # absolute backstop per leg
+  max_notional_per_trade_pct: 15      # = target_pct_per_pair with headroom for beta
+  max_notional_per_asset: 400000
+  max_notional_per_asset_pct: 45      # one symbol may appear in several pairs
+  max_notional_per_broker: 1000000
+  max_api_errors_per_hour: 30
+  max_order_rejections_per_day: 30
+
+per_strategy:
+  max_strategy_allocation_pct: 50
+  max_strategy_drawdown_pct: 5.0
+  max_strategy_open_trades: 10
+  max_strategy_daily_loss_pct: 1.5
+
+per_pair:
+  max_pair_notional: 200000
+  max_pair_notional_pct: 30           # both legs combined
+  max_pair_loss: 100000               # absolute backstop
+  max_pair_loss_pct: 1.5              # hard unrealized-loss stop per open pair
+  max_pair_holding_bars: 600
+  min_liquidity_quote_volume_24h: 5000000
+  max_spread_pct: 0.25
+  max_slippage_bps: 25
+
+per_order:
+  max_order_size_notional: 150000
+  max_order_size_notional_pct: 16
+  max_market_order_notional: 150000
+  prefer_limit_orders: true
+  reject_if_stale_data_seconds: 120
+  reject_outside_market_hours: true

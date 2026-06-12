@@ -1,0 +1,18 @@
+us_stocks_50: 50 names x 1255 bars [2021-06-14 .. 2026-06-11]
+
+xsec_momentum (reference)          return=  92.86%  sharpe= 1.11  maxDD= -24.37%  fees=$    664
+A legacy features (baseline)       return=  28.53%  sharpe= 0.84  maxDD=  -8.17%  fees=$    732
+B + orthogonal features            return=   0.17%  sharpe= 0.05  maxDD= -11.47%  fees=$    588
+C + momentum neutral only          return=  26.70%  sharpe= 0.89  maxDD= -11.00%  fees=$    759
+D orthogonal + momentum neutral    return=   7.81%  sharpe= 0.30  maxDD= -12.27%  fees=$    613
+
+correlation of daily sleeve returns vs xsec_momentum:
+  A legacy features (baseline)       +0.193
+  B + orthogonal features            +0.121
+  C + momentum neutral only          +0.204
+  D orthogonal + momentum neutral    +0.146
+
+ensembles (daily profile gates: min_sleeve_t=0, target_vol=10%):
+3-sleeve baseline (pca+xsmom+tsmom) return=  36.25%  sharpe= 1.05  maxDD=  -7.41%  fees=$   1177
+4-sleeve + ml_alpha variant D      return=  25.50%  sharpe= 0.91  maxDD=  -7.68%  fees=$   1162
+4-sleeve + ml_alpha variant A (old) return=  28.43%  sharpe= 0.95  maxDD=  -9.55%  fees=$   1203

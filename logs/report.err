@@ -1,0 +1,100 @@
++---------------------------------------- Traceback (most recent call last) -----------------------------------------+
+| C:\Users\Youssef\Documents\Business\StatisticalArbitrage\stat_arb_bot\app\cli\main.py:455 in report                |
+|                                                                                                                    |
+|   452     if run is None:                                                                                          |
+|   453         console.print("[yellow]No backtest runs recorded yet.[/yellow]")                                     |
+|   454         raise typer.Exit(1)                                                                                  |
+| > 455     console.print(f"[bold]{run.strategy}[/bold] {run.interval} "                                             |
+|   456                   f"{run.start_ts} \u2192 {run.end_ts} (created {run.created_at})")                               |
+|   457     metrics = json.loads(run.metrics_json)                                                                   |
+|   458     table = Table(title="Metrics")                                                                           |
+|                                                                                                                    |
+| C:\Users\Youssef\Documents\Business\StatisticalArbitrage\stat_arb_bot\.venv\Lib\site-packages\rich\console.py:1704 |
+| in print                                                                                                           |
+|                                                                                                                    |
+|   1701                 overflow = "ignore"                                                                         |
+|   1702             crop = False                                                                                    |
+|   1703         render_hooks = self._render_hooks[:]                                                                |
+| > 1704         with self:                                                                                          |
+|   1705             renderables = self._collect_renderables(                                                        |
+|   1706                 objects,                                                                                    |
+|   1707                 sep,                                                                                        |
+|                                                                                                                    |
+| C:\Users\Youssef\Documents\Business\StatisticalArbitrage\stat_arb_bot\.venv\Lib\site-packages\rich\console.py:864  |
+| in __exit__                                                                                                        |
+|                                                                                                                    |
+|    861                                                                                                             |
+|    862     def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:                              |
+|    863         """Exit buffer context."""                                                                          |
+| >  864         self._exit_buffer()                                                                                 |
+|    865                                                                                                             |
+|    866     def begin_capture(self) -> None:                                                                        |
+|    867         """Begin capturing console output. Call :meth:`end_capture` to exit capture mode and return         |
+|        output."""                                                                                                  |
+|                                                                                                                    |
+| C:\Users\Youssef\Documents\Business\StatisticalArbitrage\stat_arb_bot\.venv\Lib\site-packages\rich\console.py:820  |
+| in _exit_buffer                                                                                                    |
+|                                                                                                                    |
+|    817     def _exit_buffer(self) -> None:                                                                         |
+|    818         """Leave buffer context, and render content if required."""                                         |
+|    819         self._buffer_index -= 1                                                                             |
+| >  820         self._check_buffer()                                                                                |
+|    821                                                                                                             |
+|    822     def set_live(self, live: "Live") -> bool:                                                               |
+|    823         """Set Live instance. Used by Live context manager (no need to call directly).                      |
+|                                                                                                                    |
+| C:\Users\Youssef\Documents\Business\StatisticalArbitrage\stat_arb_bot\.venv\Lib\site-packages\rich\console.py:2055 |
+| in _check_buffer                                                                                                   |
+|                                                                                                                    |
+|   2052             return                                                                                          |
+|   2053                                                                                                             |
+|   2054         try:                                                                                                |
+| > 2055             self._write_buffer()                                                                            |
+|   2056         except BrokenPipeError:                                                                             |
+|   2057             self.on_broken_pipe()                                                                           |
+|   2058                                                                                                             |
+|                                                                                                                    |
+| C:\Users\Youssef\Documents\Business\StatisticalArbitrage\stat_arb_bot\.venv\Lib\site-packages\rich\console.py:2091 |
+| in _write_buffer                                                                                                   |
+|                                                                                                                    |
+|   2088                             if self.no_color and self._color_system:                                        |
+|   2089                                 buffer = list(Segment.remove_color(buffer))                                 |
+|   2090                                                                                                             |
+| > 2091                             legacy_windows_render(buffer, LegacyWindowsTerm(self.file))                     |
+|   2092                         else:                                                                               |
+|   2093                             # Either a non-std stream on legacy Windows, or modern Windows.                 |
+|   2094                             text = self._render_buffer(self._buffer[:])                                     |
+|                                                                                                                    |
+| C:\Users\Youssef\Documents\Business\StatisticalArbitrage\stat_arb_bot\.venv\Lib\site-packages\rich\_windows_render |
+| er.py:19 in legacy_windows_render                                                                                  |
+|                                                                                                                    |
+|   16             if style:                                                                                         |
+|   17                 term.write_styled(text, style)                                                                |
+|   18             else:                                                                                             |
+| > 19                 term.write_text(text)                                                                         |
+|   20         else:                                                                                                 |
+|   21             control_codes: Sequence[ControlCode] = control                                                    |
+|   22             for control_code in control_codes:                                                                |
+|                                                                                                                    |
+| C:\Users\Youssef\Documents\Business\StatisticalArbitrage\stat_arb_bot\.venv\Lib\site-packages\rich\_win32_console. |
+| py:402 in write_text                                                                                               |
+|                                                                                                                    |
+|   399         Args:                                                                                                |
+|   400             text (str): The text to write to the console                                                     |
+|   401         """                                                                                                  |
+| > 402         self.write(text)                                                                                     |
+|   403         self.flush()                                                                                         |
+|   404                                                                                                              |
+|   405     def write_styled(self, text: str, style: Style) -> None:                                                 |
+|                                                                                                                    |
+| C:\Program Files\Python314\Lib\encodings\cp1252.py:19 in encode                                                    |
+|                                                                                                                    |
+|    16                                                                                                              |
+|    17 class IncrementalEncoder(codecs.IncrementalEncoder):                                                         |
+|    18     def encode(self, input, final=False):                                                                    |
+| >  19         return codecs.charmap_encode(input,self.errors,encoding_table)[0]                                    |
+|    20                                                                                                              |
+|    21 class IncrementalDecoder(codecs.IncrementalDecoder):                                                         |
+|    22     def decode(self, input, final=False):                                                                    |
++--------------------------------------------------------------------------------------------------------------------+
+UnicodeEncodeError: 'charmap' codec can't encode character '\u2192' in position 1: character maps to <undefined>

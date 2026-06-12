@@ -1,0 +1,62 @@
+# Broker capability matrix. Enforced by the risk manager and broker base
+# classes BEFORE every order. If an action is not listed as supported here it
+# is rejected — regardless of what a strategy asks for.
+#
+# Sources (verify again before enabling a connector for real orders):
+#   Binance:     https://developers.binance.com/docs/binance-spot-api-docs
+#   Trading 212: https://docs.trading212.com/api   (checked 2026-06: official
+#                Public API covers Invest / Stocks ISA equities only)
+
+binance_spot:
+  display_name: "Binance Spot"
+  asset_classes: [crypto_spot]
+  order_types: [market, limit, stop_limit]
+  shorting: false          # spot accounts cannot hold negative balances
+  margin: false
+  max_leverage: 1.0
+  fractional: true
+  quote_currencies: [USDT, USDC, BTC, ETH]
+  market_hours: "24/7"
+  sell_convention: positive_quantity_with_side
+  notes: >
+    Quantity must respect LOT_SIZE stepSize, price must respect PRICE_FILTER
+    tickSize, and notional must exceed MIN_NOTIONAL/NOTIONAL filters. These are
+    fetched live from /api/v3/exchangeInfo.
+
+binance_futures:
+  display_name: "Binance USD-M Futures"
+  enabled_by_default: false   # opt-in only via BINANCE_USE_FUTURES=true
+  asset_classes: [crypto_futures]
+  order_types: [market, limit, stop, stop_limit]
+  shorting: true
+  margin: true
+  max_leverage: 1.0           # deliberately capped; raise consciously
+  fractional: true
+  quote_currencies: [USDT, USDC]
+  market_hours: "24/7"
+  sell_convention: positive_quantity_with_side
+  notes: >
+    Disabled by default. Requires explicit opt-in, funding-rate awareness and a
+    liquidation buffer. Not part of the MVP.
+
+trading212:
+  display_name: "Trading 212 (Invest / Stocks ISA)"
+  asset_classes: [equity]
+  order_types: [market, limit, stop, stop_limit]
+  shorting: false             # not available via the official Public API
+  margin: false
+  max_leverage: 1.0
+  fractional: true
+  quote_currencies: [USD, GBP, EUR]
+  market_hours: "exchange"
+  sell_convention: negative_quantity   # sells sent as negative qty; VERIFY on demo before first use
+  unsupported:
+    - cfd                     # CFDs are NOT exposed by the official Public API
+    - short_selling
+    - margin
+    - leverage
+  notes: >
+    Official Public API (https://docs.trading212.com/api) supports Invest and
+    Stocks ISA equity accounts only. CFDs are unsupported and MUST NOT be
+    traded through unofficial endpoints. Auth: HTTP Basic (key as username,
+    secret as password). Rate limits via x-ratelimit-* response headers.

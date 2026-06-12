@@ -1,0 +1,5 @@
+2026-06-11 21:37:38,867 INFO    app.data.storage: database initialised
+INFO:     Started server process [36784]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8377 (Press CTRL+C to quit)

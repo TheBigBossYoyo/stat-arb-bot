@@ -1,0 +1,8 @@
+3-sleeve         t_scale=0.0: return=  36.25%  sharpe= 1.05  maxDD=  -7.41%  end_alloc={'pca': 0.0, 'xsmom': 0.27, 'tsmom': 0.73}
+3-sleeve         t_scale=0.5: return=  32.84%  sharpe= 0.95  maxDD=  -7.74%  end_alloc={'pca': 0.0, 'xsmom': 0.27, 'tsmom': 0.73}
+3-sleeve         t_scale=1.0: return=  33.05%  sharpe= 0.94  maxDD=  -8.05%  end_alloc={'pca': 0.0, 'xsmom': 0.27, 'tsmom': 0.73}
+3-sleeve         t_scale=2.0: return=  33.59%  sharpe= 0.94  maxDD=  -8.36%  end_alloc={'pca': np.float64(0.0), 'xsmom': np.float64(0.28), 'tsmom': np.float64(0.72)}
+4-sleeve (+ml C) t_scale=0.0: return=  40.66%  sharpe= 1.32  maxDD=  -7.29%  end_alloc={'pca': 0.0, 'xsmom': 0.14, 'tsmom': 0.51, 'ml': 0.35}
+4-sleeve (+ml C) t_scale=0.5: return=  36.10%  sharpe= 1.17  maxDD=  -7.74%  end_alloc={'pca': 0.0, 'xsmom': 0.14, 'tsmom': 0.51, 'ml': 0.35}
+4-sleeve (+ml C) t_scale=1.0: return=  34.93%  sharpe= 1.12  maxDD=  -8.02%  end_alloc={'pca': 0.0, 'xsmom': 0.14, 'tsmom': 0.51, 'ml': 0.35}
+4-sleeve (+ml C) t_scale=2.0: return=  33.57%  sharpe= 1.06  maxDD=  -8.43%  end_alloc={'pca': np.float64(0.0), 'xsmom': np.float64(0.16), 'tsmom': np.float64(0.51), 'ml': np.float64(0.33)}

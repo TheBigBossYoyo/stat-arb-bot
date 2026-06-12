@@ -1,0 +1,13 @@
+2026-06-10 22:12:05,512 INFO    app.data.market_data: price matrix: 8640 bars x 8 symbols [2026-03-12 21:15:00 .. 2026-06-10 21:00:00]
+2026-06-10 22:12:05,534 INFO    app.research.pair_selection: correlation prefilter: 4 candidate pairs (rho >= 0.75)
+2026-06-10 22:12:07,675 INFO    app.research.pair_selection: selected 4 pairs: ['SYN2|SYN3', 'SYN4|SYN5', 'SYN0|SYN1', 'SYN6|SYN7']
+2026-06-10 22:12:08,130 INFO    app.backtesting.walk_forward: window 0: 4 pairs | IS sharpe 3.90 ret 0.10% | OOS sharpe 9.12 ret 0.05%
+2026-06-10 22:12:08,133 INFO    app.research.pair_selection: correlation prefilter: 4 candidate pairs (rho >= 0.75)
+2026-06-10 22:12:10,255 INFO    app.research.pair_selection: selected 4 pairs: ['SYN3|SYN2', 'SYN4|SYN5', 'SYN0|SYN1', 'SYN7|SYN6']
+2026-06-10 22:12:10,728 INFO    app.backtesting.walk_forward: window 1: 4 pairs | IS sharpe 3.53 ret 0.09% | OOS sharpe 7.35 ret 0.04%
+2026-06-10 22:12:10,732 INFO    app.research.pair_selection: correlation prefilter: 4 candidate pairs (rho >= 0.75)
+2026-06-10 22:12:12,844 INFO    app.research.pair_selection: selected 4 pairs: ['SYN4|SYN5', 'SYN6|SYN7', 'SYN2|SYN3', 'SYN0|SYN1']
+2026-06-10 22:12:13,292 INFO    app.backtesting.walk_forward: window 2: 4 pairs | IS sharpe 4.70 ret 0.12% | OOS sharpe 5.42 ret 0.03%
+2026-06-10 22:12:13,295 INFO    app.research.pair_selection: correlation prefilter: 4 candidate pairs (rho >= 0.75)
+2026-06-10 22:12:15,883 INFO    app.research.pair_selection: selected 4 pairs: ['SYN4|SYN5', 'SYN6|SYN7', 'SYN0|SYN1', 'SYN2|SYN3']
+2026-06-10 22:12:16,613 INFO    app.backtesting.walk_forward: window 3: 4 pairs | IS sharpe 8.31 ret 0.21% | OOS sharpe 5.12 ret 0.03%

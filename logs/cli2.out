@@ -1,0 +1,32 @@
+Running backtest: kalman_pairs on 5 pairs, 8640 bars...
+   Backtest metrics - kalman_pairs   
++-----------------------------------+
+| metric                 |    value |
+|------------------------+----------|
+| bars                   |     8640 |
+| years                  |    0.246 |
+| total_return_pct       |   -1.826 |
+| cagr_pct               |   -7.206 |
+| ann_vol_pct            |    0.216 |
+| sharpe                 |  -34.549 |
+| sortino                |  -32.791 |
+| calmar                 |   -3.942 |
+| max_drawdown_pct       |   -1.828 |
+| worst_day_pct          |   -0.058 |
+| n_trades               |      817 |
+| win_rate_pct           |     8.69 |
+| profit_factor          |    0.064 |
+| avg_trade_pnl          |  -0.2235 |
+| median_trade_pnl       |   -0.188 |
+| worst_trade_pnl        |  -2.3489 |
+| best_trade_pnl         |    0.862 |
+| avg_holding_bars       |     6.93 |
+| total_fees             | 141.5564 |
+| turnover               |   14.277 |
+| avg_gross_exposure_pct |     0.54 |
+| final_equity           |  9817.41 |
++-----------------------------------+
+
+Report: 
+C:\Users\Youssef\Documents\Business\StatisticalArbitrage\stat_arb_bot\reports\backtest_kalman_pairs_20260611_122648.md
+Simulated results only — not a promise of profitability.

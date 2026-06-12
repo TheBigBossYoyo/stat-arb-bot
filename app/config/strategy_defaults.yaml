@@ -1,0 +1,210 @@
+# Default strategy & research parameters for the MVP.
+
+universe:
+  name: crypto_top_10
+  interval: 15m
+  lookback_days: 90
+
+pair_selection:
+  min_correlation: 0.75       # log-return correlation prefilter
+  max_eg_pvalue: 0.05         # Engle-Granger cointegration p-value
+  max_adf_pvalue: 0.05        # ADF on the spread residual
+  min_half_life_bars: 3
+  max_half_life_bars: 250     # slow pairs are tradeable now that the time stop scales with half-life
+  min_spread_std: 0.002       # log-spread std; below this, costs eat the edge
+  min_observations: 500
+  max_pairs: 10
+
+zscore_signal:
+  lookback_bars: 200          # rolling window for spread mean/std
+  entry_z: 2.0
+  exit_z: 0.3
+  stop_z: 3.5
+  max_holding_bars: 480       # hard cap (5 days of 15m bars)
+  holding_half_life_mult: 4.0 # time stop = 4 x half-life, clamped to the cap:
+                              # a 96-bar budget on 150-190-bar half-life pairs
+                              # time-stopped most trades before convergence
+  min_holding_bars: 24
+
+cointegration_strategy:
+  refit_every_bars: 96        # re-estimate hedge ratio daily (15m bars)
+  refit_window_bars: 2000
+  invalid_pvalue: 0.10        # pair on probation above this
+  max_invalid_refits: 3       # disable pair after N consecutive bad refits
+  lookback_half_life_mult: 5  # dynamic lookback = 5 * half-life
+  min_lookback_bars: 50
+  max_lookback_bars: 500
+
+kalman_signal:
+  delta: 1.0e-7             # hedge-ratio drift speed; 1e-5 adapted so fast the
+                            # innovation was pure noise (8.7% win rate, -1.8%)
+  r: 1.0e-3                 # observation noise
+  warmup_bars: 200
+  zscore_window: 200
+  entry_z: 2.0
+  exit_z: 0.5
+  stop_z: 4.0
+  max_holding_bars: 288
+  min_holding_bars: 4       # don't churn out on next-bar noise
+  beta_min: 0.05            # entries blocked while beta is outside this band
+  beta_max: 20.0
+  max_drift_t: 2.0          # block entries while innovations show drift
+
+regime_filter:
+  enabled: true             # skip new mean-reversion entries in strong trends
+  window: 96
+  t_threshold: 3.0
+
+basket:                     # cross-sectional strategies (pca_stat_arb, xsec_reversion)
+  fit_window: 1500
+  rebalance_every: 48
+  cost_bps: 15
+  n_components: 3
+  score_window: 120         # short OU fits are noise; the score must be stable
+  top_k: 2
+  xsec_lookback_bars: 12
+  # Avellaneda-Lee OU scoring for pca_stat_arb
+  use_ou_scores: true
+  s_entry: 1.25             # open when |s| clears this (Avellaneda-Lee value)
+  s_exit: 0.25              # hold until s reverts through this (hysteresis)
+  max_residual_half_life: 30
+
+momentum:                   # tsmom / xsec_momentum basket strategies
+  tsmom_lookback_bars: 672  # 1 week of 15m bars
+  tsmom_skip_bars: 12       # skip the most recent 3h (short-term reversal zone)
+  tsmom_vol_window: 96
+  tsmom_max_weight: 0.30
+  xsmom_lookback_bars: 1344 # ~2 weeks; shorter horizons are dominated by reversal
+  xsmom_skip_bars: 24
+  xsmom_top_k: 2
+
+ml_alpha:                   # gradient-boosted cross-sectional return forecaster
+  horizons: [12, 48, 96, 336, 672]   # multi-horizon returns (base = 15m bars)
+  vol_windows: [48, 96]
+  forward_bars: 48          # predict the next ~12h of relative return
+  retrain_every: 10         # refit every 10 rebalances (walk-forward)
+  top_frac: 0.2             # trade the top/bottom quintile of forecasts
+  max_iter: 200             # shallow, regularized trees: the signal-to-noise
+  max_depth: 3              # of financial data punishes model capacity
+  learning_rate: 0.05
+
+ensemble:                   # `backtest-ensemble` multi-sleeve combination
+  # xsec_momentum needs a wider universe (50+ names) — add it for equities
+  sleeves: [pca_stat_arb, xsec_reversion, tsmom]
+  vol_window: 30
+  min_observations: 5
+  gross_target: 1.0
+  max_sleeve_share: 0.60
+  min_sleeve_t: -0.5        # cut sleeves whose trailing return t-stat is worse
+  target_vol_pct: 0         # vol targeting OFF for crypto: rescaling churns the
+                            # whole book each rebalance and at 15bps the cost
+                            # drag exceeded the benefit (+1.7% -> -3.0%)
+
+allocation:                 # `backtest --allocate` inverse-vol weights
+  total_target_pct: 0.60
+  max_per_pair_pct: 0.15
+  min_per_pair_pct: 0.02
+
+backtest:
+  starting_cash: 10000
+  target_pct_per_pair: 0.10   # max 10% of equity per pair
+  slippage_bps: 5
+  commission_bps: 10          # Binance spot taker fee
+  allow_short: true           # synthetic shorting in paper/backtest only
+  min_edge_ratio: 1.3         # entry gate: expected reversion >= 1.3x round-trip cost
+  target_spread_vol: 0.02     # de-risk pairs whose rolling spread std exceeds this
+
+walk_forward:
+  train_bars: 4000
+  test_bars: 1000
+
+# ---------------------------------------------------------------------------
+# Daily-bar profile (stocks / FX research data, e.g. universe us_stocks_50).
+# Merged over the sections above when --interval 1d: the base values are
+# tuned in 15m bars and would be wrong by ~96x on daily data, and the 15bps
+# crypto cost model overstates costs on liquid US large caps (~5bps).
+# ---------------------------------------------------------------------------
+daily:
+  pair_selection:
+    min_correlation: 0.70
+    min_half_life_bars: 2       # bars are DAYS here
+    max_half_life_bars: 40
+    min_spread_std: 0.004
+    min_observations: 252       # one trading year
+    max_pairs: 15               # 50-name universe supports more pairs
+  zscore_signal:
+    lookback_bars: 60
+    max_holding_bars: 60
+    min_holding_bars: 3
+  cointegration_strategy:
+    refit_every_bars: 21        # monthly refit
+    refit_window_bars: 252
+    min_lookback_bars: 30
+    max_lookback_bars: 252
+  kalman_signal:
+    delta: 1.0e-5               # ~96 15m-bars per day: scale process noise up
+    warmup_bars: 60
+    zscore_window: 60
+    max_holding_bars: 60
+    min_holding_bars: 1
+  regime_filter:
+    window: 63                  # one quarter
+  basket:
+    fit_window: 300             # >= momentum lookback + skip (252 + 21)
+    rebalance_every: 1          # Avellaneda-Lee rebalance daily
+    cost_bps: 5                 # liquid US large caps, zero-commission retail
+    n_components: 5
+    var_threshold: 0.55         # Avellaneda-Lee: components by explained
+                                # variance, so the factor model scales with
+                                # breadth (fixed 5 left sector risk in the
+                                # "residuals" of a 100-name cross-section)
+    score_window: 60            # Avellaneda-Lee's canonical 60-day window
+    top_k: 8                    # ~deciles of a 50-name universe per side
+    xsec_lookback_bars: 5       # weekly reversal (Lehmann 1990)
+    s_exit: 0.5
+    max_residual_half_life: 20
+  ml_alpha:
+    horizons: [5, 10, 21, 63, 126]  # 1w/2w/1m/3m/6m returns; 252 would eat
+                                    # most of the 300-bar fit window as warmup
+    vol_windows: [21, 63]
+    forward_bars: 5           # predict next-week relative return
+    retrain_every: 21         # refit monthly
+    # train on / predict the component of return orthogonal to the two
+    # longest-horizon return ranks (Sharpe 0.84 -> 0.89 standalone; maxDD
+    # -8.2% -> -11.0%). orthogonal_features stays OFF: the volume/overnight/
+    # range-vol block buried the signal on a 50-name panel (Sharpe 0.05) —
+    # a model-capacity limit, see docs/strategy_research.md section 7b.
+    momentum_neutral: true
+    orthogonal_features: false
+  momentum:
+    tsmom_lookback_bars: 252    # classic 12-month momentum
+    tsmom_skip_bars: 21         # skip the most recent month (reversal zone)
+    tsmom_vol_window: 63
+    tsmom_max_weight: 0.10
+    xsmom_lookback_bars: 252    # Jegadeesh-Titman 12-1 momentum
+    xsmom_skip_bars: 21
+    xsmom_top_k: 5
+    xsmom_top_frac: 0.10        # decile books: scales with universe breadth
+  ensemble:
+    # xsec momentum has the breadth it needs on 50 names; short-horizon
+    # reversal is dropped (negative net of costs in every test). ml_alpha
+    # earned its slot once momentum_neutral was on (the raw sleeve diluted
+    # the blend; the momentum-orthogonal version lifts it). pca_stat_arb is
+    # dropped: negative standalone on the current window, and the spells
+    # where the gate funded it cost ~8pp of return (Sharpe 1.32 -> 1.34,
+    # +40.7% -> +48.5% without it; holds at vol_window 40/60/80).
+    # sector_stat_arb tested negative too. docs/strategy_research.md §5,7c.
+    sleeves: [xsec_momentum, tsmom, ml_alpha]
+    vol_window: 60
+    min_observations: 20
+    target_vol_pct: 10      # equities sleeve mix targets a lower vol
+    min_sleeve_t: 0.0       # fund only sleeves with non-negative trailing
+                            # t-stat: -0.5 kept a Sharpe -0.95 sleeve funded
+                            # (its 60-day t-stat hovers around -0.46)
+  backtest:
+    slippage_bps: 3             # ~5bps per leg round trip on liquid names
+    commission_bps: 2
+    target_spread_vol: 0.04     # daily spreads are wider than 15m spreads
+  walk_forward:
+    train_bars: 504             # two years in-sample
+    test_bars: 126              # six months out-of-sample

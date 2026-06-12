@@ -1,0 +1,2 @@
+no-pca vol_win=40: return=  38.28%  sharpe= 1.14  maxDD= -10.60%
+no-pca vol_win=80: return=  52.79%  sharpe= 1.43  maxDD=  -8.80%

@@ -1,0 +1,4 @@
+fit600 A legacy features          return=  11.81%  sharpe= 0.52  maxDD=  -7.08%
+fit600 B + orthogonal features    return=   7.20%  sharpe= 0.33  maxDD= -12.70%
+fit600 C + momentum neutral       return=   5.85%  sharpe= 0.32  maxDD=  -9.89%
+fit600 D orthogonal + neutral     return=  -4.75%  sharpe=-0.20  maxDD= -17.38%

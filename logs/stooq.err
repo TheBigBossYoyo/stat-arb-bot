@@ -1,0 +1,94 @@
+2026-06-11 13:35:34,180 INFO    app.data.storage: database initialised
++---------------------------------------- Traceback (most recent call last) -----------------------------------------+
+| C:\Users\Youssef\Documents\Business\StatisticalArbitrage\stat_arb_bot\app\cli\main.py:157 in download_data         |
+|                                                                                                                    |
+|   154     if source == "synthetic" and not symbols and not universe:                                               |
+|   155         universe = "synthetic_demo"                                                                          |
+|   156     syms = _parse_symbols(symbols, universe)                                                                 |
+| > 157     summary = HistoricalDataLoader(storage).download(syms, interval, days, source=source)                    |
+|   158                                                                                                              |
+|   159     table = Table(title=f"Download summary ({source}, {interval}, {days}d)")                                 |
+|   160     table.add_column("symbol")                                                                               |
+|                                                                                                                    |
+| C:\Users\Youssef\Documents\Business\StatisticalArbitrage\stat_arb_bot\app\data\historical_loader.py:51 in download |
+|                                                                                                                    |
+|    48         if source == "binance":                                                                              |
+|    49             return self._download_binance(symbols, interval, days)                                           |
+|    50         if source == "stooq":                                                                                |
+| >  51             return self._download_stooq(symbols, interval, days)                                             |
+|    52         if source == "synthetic":                                                                            |
+|    53             return self._generate_synthetic(symbols, interval, days)                                         |
+|    54         raise ConfigurationError(                                                                            |
+|                                                                                                                    |
+| C:\Users\Youssef\Documents\Business\StatisticalArbitrage\stat_arb_bot\app\data\historical_loader.py:90 in          |
+| _download_stooq                                                                                                    |
+|                                                                                                                    |
+|    87         inserted: dict[str, int] = {}                                                                        |
+|    88         reports: list[DataQualityReport] = []                                                                |
+|    89         for symbol in symbols:                                                                               |
+| >  90             df = client.fetch_daily(symbol, start=start, end=end)                                            |
+|    91             df = clean_bars(df)                                                                              |
+|    92             # weekends/holidays are normal gaps on an exchange calendar                                      |
+|    93             report = check_bars(df, symbol=symbol, interval=interval, max_missing_pct=40.0)                  |
+|                                                                                                                    |
+| C:\Users\Youssef\Documents\Business\StatisticalArbitrage\stat_arb_bot\app\data\providers_stooq.py:64 in            |
+| fetch_daily                                                                                                        |
+|                                                                                                                    |
+|   61             params["d2"] = pd.Timestamp(end).strftime("%Y%m%d")                                               |
+|   62         response = request_with_retries(lambda: self._client.get(STOOQ_URL, params=params))                   |
+|   63         if response.status_code != 200:                                                                       |
+| > 64             raise BrokerError(f"stooq {symbol} -> {response.status_code}: {response.text[:200]}")             |
+|   65         df = parse_stooq_csv(response.text)                                                                   |
+|   66         if df.empty:                                                                                          |
+|   67             log.warning("stooq returned no data for %s (check the symbol suffix, e.g. AAPL.US)",              |
++--------------------------------------------------------------------------------------------------------------------+
+BrokerError: stooq KO.US -> 404: <meta charset=utf-8><title>Stooq</title><center 
+style=font-family:arial;margin-top:50px><p><a href=/><img src=//static.stooq.com/stooq.svg height=68></a><p 
+style=font-size:x-large>The page you request
+2026-06-11 13:35:43,398 INFO    app.data.storage: database initialised
++---------------------------------------- Traceback (most recent call last) -----------------------------------------+
+| C:\Users\Youssef\Documents\Business\StatisticalArbitrage\stat_arb_bot\app\cli\main.py:157 in download_data         |
+|                                                                                                                    |
+|   154     if source == "synthetic" and not symbols and not universe:                                               |
+|   155         universe = "synthetic_demo"                                                                          |
+|   156     syms = _parse_symbols(symbols, universe)                                                                 |
+| > 157     summary = HistoricalDataLoader(storage).download(syms, interval, days, source=source)                    |
+|   158                                                                                                              |
+|   159     table = Table(title=f"Download summary ({source}, {interval}, {days}d)")                                 |
+|   160     table.add_column("symbol")                                                                               |
+|                                                                                                                    |
+| C:\Users\Youssef\Documents\Business\StatisticalArbitrage\stat_arb_bot\app\data\historical_loader.py:51 in download |
+|                                                                                                                    |
+|    48         if source == "binance":                                                                              |
+|    49             return self._download_binance(symbols, interval, days)                                           |
+|    50         if source == "stooq":                                                                                |
+| >  51             return self._download_stooq(symbols, interval, days)                                             |
+|    52         if source == "synthetic":                                                                            |
+|    53             return self._generate_synthetic(symbols, interval, days)                                         |
+|    54         raise ConfigurationError(                                                                            |
+|                                                                                                                    |
+| C:\Users\Youssef\Documents\Business\StatisticalArbitrage\stat_arb_bot\app\data\historical_loader.py:90 in          |
+| _download_stooq                                                                                                    |
+|                                                                                                                    |
+|    87         inserted: dict[str, int] = {}                                                                        |
+|    88         reports: list[DataQualityReport] = []                                                                |
+|    89         for symbol in symbols:                                                                               |
+| >  90             df = client.fetch_daily(symbol, start=start, end=end)                                            |
+|    91             df = clean_bars(df)                                                                              |
+|    92             # weekends/holidays are normal gaps on an exchange calendar                                      |
+|    93             report = check_bars(df, symbol=symbol, interval=interval, max_missing_pct=40.0)                  |
+|                                                                                                                    |
+| C:\Users\Youssef\Documents\Business\StatisticalArbitrage\stat_arb_bot\app\data\providers_stooq.py:64 in            |
+| fetch_daily                                                                                                        |
+|                                                                                                                    |
+|   61             params["d2"] = pd.Timestamp(end).strftime("%Y%m%d")                                               |
+|   62         response = request_with_retries(lambda: self._client.get(STOOQ_URL, params=params))                   |
+|   63         if response.status_code != 200:                                                                       |
+| > 64             raise BrokerError(f"stooq {symbol} -> {response.status_code}: {response.text[:200]}")             |
+|   65         df = parse_stooq_csv(response.text)                                                                   |
+|   66         if df.empty:                                                                                          |
+|   67             log.warning("stooq returned no data for %s (check the symbol suffix, e.g. AAPL.US)",              |
++--------------------------------------------------------------------------------------------------------------------+
+BrokerError: stooq EURUSD -> 404: <meta charset=utf-8><title>Stooq</title><center 
+style=font-family:arial;margin-top:50px><p><a href=/><img src=//static.stooq.com/stooq.svg height=68></a><p 
+style=font-size:x-large>The page you request

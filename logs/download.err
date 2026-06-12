@@ -1,0 +1,21 @@
+2026-06-10 22:12:00,998 INFO    app.data.storage: database initialised
+2026-06-10 22:12:09,073 INFO    app.data.data_quality: [OK] BTCUSDT 15m: rows=8640 dups=0 nonpos=0 missing=0 (0.00%) max|ret|=0.0346
+2026-06-10 22:12:09,977 INFO    app.data.historical_loader: downloaded BTCUSDT 15m: 8640 rows (8640 new)
+2026-06-10 22:12:14,842 INFO    app.data.data_quality: [OK] ETHUSDT 15m: rows=8640 dups=0 nonpos=0 missing=0 (0.00%) max|ret|=0.0572
+2026-06-10 22:12:16,135 INFO    app.data.historical_loader: downloaded ETHUSDT 15m: 8640 rows (8640 new)
+2026-06-10 22:12:22,228 INFO    app.data.data_quality: [OK] SOLUSDT 15m: rows=8640 dups=0 nonpos=0 missing=0 (0.00%) max|ret|=0.0531
+2026-06-10 22:12:23,314 INFO    app.data.historical_loader: downloaded SOLUSDT 15m: 8640 rows (8640 new)
+2026-06-10 22:12:27,933 INFO    app.data.data_quality: [OK] BNBUSDT 15m: rows=8640 dups=0 nonpos=0 missing=0 (0.00%) max|ret|=0.0327
+2026-06-10 22:12:29,037 INFO    app.data.historical_loader: downloaded BNBUSDT 15m: 8640 rows (8640 new)
+2026-06-10 22:12:33,233 INFO    app.data.data_quality: [OK] XRPUSDT 15m: rows=8640 dups=0 nonpos=0 missing=0 (0.00%) max|ret|=0.0395
+2026-06-10 22:12:34,285 INFO    app.data.historical_loader: downloaded XRPUSDT 15m: 8640 rows (8640 new)
+2026-06-10 22:12:38,535 INFO    app.data.data_quality: [OK] ADAUSDT 15m: rows=8640 dups=0 nonpos=0 missing=0 (0.00%) max|ret|=0.0445
+2026-06-10 22:12:39,496 INFO    app.data.historical_loader: downloaded ADAUSDT 15m: 8640 rows (8640 new)
+2026-06-10 22:12:43,325 INFO    app.data.data_quality: [OK] AVAXUSDT 15m: rows=8640 dups=0 nonpos=0 missing=0 (0.00%) max|ret|=0.0488
+2026-06-10 22:12:44,441 INFO    app.data.historical_loader: downloaded AVAXUSDT 15m: 8640 rows (8640 new)
+2026-06-10 22:12:48,372 INFO    app.data.data_quality: [OK] LINKUSDT 15m: rows=8640 dups=0 nonpos=0 missing=0 (0.00%) max|ret|=0.0551
+2026-06-10 22:12:49,490 INFO    app.data.historical_loader: downloaded LINKUSDT 15m: 8640 rows (8640 new)
+2026-06-10 22:12:54,053 INFO    app.data.data_quality: [OK] DOGEUSDT 15m: rows=8640 dups=0 nonpos=0 missing=0 (0.00%) max|ret|=0.0460
+2026-06-10 22:12:55,083 INFO    app.data.historical_loader: downloaded DOGEUSDT 15m: 8640 rows (8640 new)
+2026-06-10 22:12:59,414 INFO    app.data.data_quality: [OK] LTCUSDT 15m: rows=8640 dups=0 nonpos=0 missing=0 (0.00%) max|ret|=0.0350
+2026-06-10 22:13:00,296 INFO    app.data.historical_loader: downloaded LTCUSDT 15m: 8640 rows (8640 new)
