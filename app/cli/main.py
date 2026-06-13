@@ -2554,6 +2554,202 @@ def futures_readiness(
 
 
 # --------------------------------------------------------------------------------
+# Phase 5 — supervised shadow / paper modes (per product path)
+# --------------------------------------------------------------------------------
+
+PRODUCTS = ("long_only_equity", "crypto_futures")
+
+
+def _supervised_cycles(settings, storage, product, mode, *, cycles, starting_cash, persist):
+    """Run `cycles` daily cycles for a product, recording shadow/paper orders +
+    simulated fills + TCA. Returns the period summary. Equity is marked at each
+    bar's close; realized PnL is the book's change since the previous cycle."""
+    from app.execution.shadow import (
+        PaperBook,
+        ShadowCycle,
+        ShadowRecorder,
+        load_paper_book,
+        save_paper_book,
+        summarize_period,
+    )
+
+    recorder = ShadowRecorder(settings.runtime_dir, product)
+    if product == "long_only_equity":
+        defaults, prices, _cfg, reb_every = _long_only_setup(storage, "us_stocks_50", "1d")
+        fit = 300
+        fn, _ = _build_long_only("long_only_xsec_momentum", defaults, "us_stocks_50",
+                                 "1d", _regime_cfg(True, 0.0), reb_every)
+        from app.execution.trading212_rebalancer import RebalanceConfig, Trading212Rebalancer
+        instruments = _synthetic_trading212_instruments(prices.symbols)
+        rebalancer = Trading212Rebalancer(instruments, RebalanceConfig())
+        funding_aux = None
+    else:
+        prices = _load_futures_prices(storage, "crypto_top_20", "1d")
+        _raw, funding_aux = _build_funding_aux(prices.symbols, prices.index, quiet=True)
+        fit = 150
+        fn = _futures_strategy("crypto_futures_ensemble")
+
+    book = (load_paper_book(settings.runtime_dir, product, starting_cash)
+            if (mode == "paper" and persist) else PaperBook(cash=starting_cash))
+    n = len(prices.close)
+    start_t = max(fit + 1, n - cycles)
+    prev_equity = book.equity({s: float(prices.close[s].iloc[start_t - 1]) for s in prices.symbols})
+    slippage_bps = 5.0 if product == "long_only_equity" else 7.0
+
+    for t in range(start_t, n):
+        prices_t = {s: float(prices.close[s].iloc[t]) for s in prices.symbols}
+        equity_now = book.equity(prices_t)
+        realized = equity_now - prev_equity
+        prev_equity = equity_now
+        window = prices.close.iloc[t - fit + 1: t + 1]
+        aux = {k: v.iloc[t - fit + 1: t + 1] for k, v in prices.aux.items()}
+        if funding_aux is not None:
+            aux["funding"] = funding_aux.iloc[t - fit + 1: t + 1]
+        weights = (fn(window, aux=aux) if getattr(fn, "wants_aux", False) else fn(window))
+        weights = weights.clip(lower=0.0) if product == "long_only_equity" else weights
+
+        orders, rejected, notes = [], [], []
+        if product == "long_only_equity":
+            plan = rebalancer.plan({s: float(w) for s, w in weights.items()},
+                                   dict(book.positions), book.cash, prices_t,
+                                   market_open=True)
+            notes = plan.notes
+            for sym, reason in plan.skipped:
+                rejected.append([sym, reason])
+            for o in plan.orders:
+                r = o.request
+                fill_px = r.ref_price * (1 + slippage_bps / 1e4 if r.side.value == "buy"
+                                         else 1 - slippage_bps / 1e4)
+                fee = abs(r.quantity) * r.ref_price * slippage_bps / 1e4
+                book.apply_fill(r.symbol, r.side.value, r.quantity, fill_px, fee)
+                orders.append({"symbol": r.symbol, "side": r.side.value,
+                               "quantity": round(r.quantity, 6), "ref_price": r.ref_price,
+                               "limit_price": r.limit_price, "target_weight": o.weight_after,
+                               "expected_slippage_bps": slippage_bps})
+        else:
+            from app.brokers.binance.futures_testnet_execution import (
+                FuturesExecutionConfig,
+                FuturesTestnetExecutor,
+            )
+            ex = FuturesTestnetExecutor(FuturesExecutionConfig(
+                mode="paper" if mode == "paper" else "paper", slippage_bps=slippage_bps))
+            rep = ex.execute_target({s: float(w) for s, w in weights.items()},
+                                    dict(book.positions), equity_now, prices_t)
+            for sym, reason in rep.rejected:
+                rejected.append([sym, reason])
+            for f in rep.fills:
+                book.apply_fill(f.symbol, f.side.value, f.quantity, f.price, f.fee)
+                orders.append({"symbol": f.symbol, "side": f.side.value,
+                               "quantity": round(f.quantity, 6), "ref_price": f.price,
+                               "limit_price": None, "target_weight": float(weights.get(f.symbol, 0)),
+                               "expected_slippage_bps": slippage_bps})
+
+        gross = float(sum(abs(q) * prices_t.get(s, 0) for s, q in book.positions.items()))
+        recorder.record(ShadowCycle(
+            ts=str(prices.close.index[t]), product=product, mode=mode,
+            equity=round(equity_now, 2), cash=round(book.cash, 2), n_orders=len(orders),
+            n_rejected=len(rejected), gross_exposure=round(gross / equity_now, 3) if equity_now else 0,
+            orders=orders, rejected=rejected, notes=notes,
+            realized_pnl=round(realized, 2)))
+
+    if mode == "paper" and persist:
+        save_paper_book(settings.runtime_dir, product, book)
+    return summarize_period(recorder.load())
+
+
+@app.command("shadow-start")
+def shadow_start(
+    product: str = typer.Option("long_only_equity", help=" | ".join(PRODUCTS)),
+    cycles: int = typer.Option(30, help="daily cycles to record (replays recent bars)"),
+    starting_cash: float = typer.Option(10_000.0),
+) -> None:
+    """Record a supervised SHADOW period: daily orders + counterfactual fills +
+    TCA, executing nothing. (Replays recent bars to bootstrap the track.)"""
+    settings, storage = _bootstrap()
+    if product not in PRODUCTS:
+        raise typer.BadParameter(f"unknown product {product!r}; choose {PRODUCTS}")
+    console.print(f"[green]SHADOW[/green] {product}: recording {cycles} cycles. NO REAL ORDERS.")
+    summary = _supervised_cycles(settings, storage, product, "shadow",
+                                 cycles=cycles, starting_cash=starting_cash, persist=False)
+    _print_shadow_summary(summary)
+
+
+@app.command("paper-start")
+def paper_start(
+    product: str = typer.Option("long_only_equity", help=" | ".join(PRODUCTS)),
+    cycles: int = typer.Option(30),
+    starting_cash: float = typer.Option(10_000.0),
+) -> None:
+    """Record a supervised PAPER period: simulated fills against a persisted book
+    with rejected-order + cost accounting. Futures are testnet/paper; live blocked."""
+    settings, storage = _bootstrap()
+    if product not in PRODUCTS:
+        raise typer.BadParameter(f"unknown product {product!r}; choose {PRODUCTS}")
+    console.print(f"[green]PAPER[/green] {product}: simulating {cycles} cycles. NO REAL ORDERS.")
+    summary = _supervised_cycles(settings, storage, product, "paper",
+                                 cycles=cycles, starting_cash=starting_cash, persist=True)
+    _print_shadow_summary(summary)
+
+
+def _print_shadow_summary(summary: dict) -> None:
+    table = Table(title="Supervised period summary")
+    table.add_column("metric")
+    table.add_column("value", justify="right")
+    for k, v in summary.items():
+        table.add_row(k, str(v))
+    console.print(table)
+
+
+@app.command("shadow-report")
+def shadow_report(
+    product: str = typer.Option("long_only_equity"),
+    last: int = typer.Option(90, help="days of history to include"),
+) -> None:
+    """Summarize a recorded shadow/paper period (orders, TCA, paper PnL)."""
+    settings, _ = _bootstrap()
+    from app.execution.shadow import ShadowRecorder, summarize_period
+
+    since = (utc_now() - timedelta(days=last)).replace(tzinfo=None)
+    rows = ShadowRecorder(settings.runtime_dir, product).load()
+    rows = [r for r in rows if str(r["ts"]) >= str(since)] or rows
+    if not rows:
+        console.print(f"[yellow]No shadow/paper records for {product}. Run shadow-start.[/yellow]")
+        raise typer.Exit(1)
+    _print_shadow_summary(summarize_period(rows))
+
+
+@app.command("paper-readiness-report")
+def paper_readiness_report(
+    product: str = typer.Option("long_only_equity"),
+    min_cycles: int = typer.Option(20),
+) -> None:
+    """Verdict on whether the supervised paper period qualifies (Phase 5).
+
+    Checks period length, reject rate, slippage and paper PnL. Even a PASS notes
+    that a real FORWARD period is still required before any live conversation —
+    replayed cycles validate the pipeline, not calendar time."""
+    settings, _ = _bootstrap()
+    from app.execution.shadow import ShadowRecorder, paper_readiness, summarize_period
+
+    rows = ShadowRecorder(settings.runtime_dir, product).load()
+    if not rows:
+        console.print(f"[yellow]No records for {product}. Run paper-start first.[/yellow]")
+        raise typer.Exit(1)
+    summary = summarize_period(rows)
+    ok, reasons = paper_readiness(summary, min_cycles=min_cycles)
+    _print_shadow_summary(summary)
+    replayed = any(r.get("mode") in ("shadow", "paper") for r in rows)
+    color = "green" if ok else "yellow"
+    console.print(f"\npipeline readiness: [{color}]{'PASS' if ok else 'NOT YET'}[/]")
+    for r in reasons:
+        console.print(f"  [red]FAIL[/] {r}")
+    console.print("[yellow]NOTE: replayed/short cycles validate the order pipeline + TCA, "
+                  "NOT real forward calendar time. A genuine supervised forward period is "
+                  "still required before live.[/yellow]" if replayed else "")
+    console.print("[bold red]NOT LIVE ELIGIBLE.[/bold red]")
+
+
+# --------------------------------------------------------------------------------
 # Phase 3 — point-in-time / survivorship-bias bound
 # --------------------------------------------------------------------------------
 
