@@ -2553,6 +2553,124 @@ def futures_readiness(
     console.print(f"[green]Report:[/green] {out}")
 
 
+# --------------------------------------------------------------------------------
+# Phase 4 — crisis-regime + crash-protection testing
+# --------------------------------------------------------------------------------
+
+def _crisis_equity_runner(strategy, universe, interval, *, regime=True):
+    """Build (run_fn, label) for the crisis suite over the equity basket engine.
+    run_fn(close, aux) -> equity. A fresh weight fn per call (sleeves stateful)."""
+    settings, storage = _bootstrap()
+    from app.backtesting.basket_engine import BasketConfig, run_basket_backtest
+
+    defaults = _strategy_defaults(interval)
+    basket_raw = defaults.get("basket", {}) or {}
+    reb_every = 5 if strategy.startswith("long_only") else int(basket_raw.get("rebalance_every", 1))
+    config = BasketConfig(
+        interval=interval, fit_window=int(basket_raw.get("fit_window", 300)),
+        rebalance_every=reb_every, cost_bps=float(basket_raw.get("cost_bps", 5)),
+        bars_per_year=_bars_per_year(universe, interval), fill="same_close", label="crisis")
+
+    def build_fn():
+        if strategy.startswith("long_only"):
+            from app.backtesting.long_only_engine import _long_only_guard
+            rc = _regime_cfg(regime, 0.0)
+            fn, _ = _build_long_only(strategy, defaults, universe, interval, rc, reb_every)
+            return _long_only_guard(fn, 0.20, 1.0)
+        _, ens = _build_ensemble(None, defaults, False, universe, interval, 1.0, reb_every)
+        return ens
+
+    def run_fn(close, aux):
+        return run_basket_backtest(close, build_fn(), config, aux=aux,
+                                   open_=close).equity
+    return run_fn, config
+
+
+@app.command("crisis-test")
+def crisis_test(
+    strategy: str = typer.Option("long_only_xsec_momentum",
+                                 help="long_only_* | ensemble (market-neutral)"),
+    universe: str = typer.Option("us_stocks_50"),
+    interval: str = typer.Option("1d"),
+) -> None:
+    """Run a strategy through synthetic crisis regimes (Phase 4, blocker #10).
+
+    Injects momentum-crash / correlation-spike / vol-spike / gap / squeeze
+    scenarios into the historical panel and reports the crisis-window outcome —
+    the 2008/2020-style tail the 2021-2026 window never exercised."""
+    settings, storage = _bootstrap()
+    from app.backtesting.crisis import run_crisis_suite
+    from app.data.market_data import build_price_matrix
+    from app.data.universe import get_universe
+
+    prices = build_price_matrix(storage, get_universe(universe), interval, adjusted=True)
+    run_fn, _ = _crisis_equity_runner(strategy, universe, interval)
+    console.print(f"Crisis test: [bold]{strategy}[/bold] on {universe}...")
+    table = run_crisis_suite(prices.close, run_fn, aux=prices.aux)
+    console.print(table)
+    base_dd = table.loc["base", "full_max_dd_pct"]
+    worst = table["crisis_max_dd_pct"].astype(float).min()
+    console.print(f"[bold]Worst crisis drawdown[/bold]: {worst}% (base full DD {base_dd}%)")
+    out = settings.reports_dir / f"crisis_{strategy}_{universe}.md"
+    out.write_text(f"# Crisis test — {strategy} ({universe}, {interval})\n\n"
+                   f"{table.to_markdown()}\n\nWorst crisis DD: {worst}%\n", encoding="utf-8")
+    console.print(f"[green]Report:[/green] {out}")
+
+
+@app.command("crash-protection-backtest")
+def crash_protection_backtest(
+    strategy: str = typer.Option("long_only_xsec_momentum"),
+    universe: str = typer.Option("us_stocks_50"),
+    interval: str = typer.Option("1d"),
+) -> None:
+    """Compare a momentum book WITH vs WITHOUT crash protection (regime filter).
+
+    Acceptance: protection becomes default only if it improves the crisis
+    outcome WITHOUT destroying the normal-regime full-window return."""
+    settings, storage = _bootstrap()
+    import pandas as pd
+
+    from app.backtesting.crisis import run_crisis_suite
+    from app.data.market_data import build_price_matrix
+    from app.data.universe import get_universe
+
+    prices = build_price_matrix(storage, get_universe(universe), interval, adjusted=True)
+    rows = []
+    for label, regime in (("protection_off", False), ("protection_on", True)):
+        run_fn, _ = _crisis_equity_runner(strategy, universe, interval, regime=regime)
+        tbl = run_crisis_suite(prices.close, run_fn, aux=prices.aux)
+        rows.append({"variant": label,
+                     "normal_full_return_pct": tbl.loc["base", "full_return_pct"],
+                     "momentum_crash_return_pct": tbl.loc["momentum_crash", "crisis_return_pct"],
+                     "momentum_crash_dd_pct": tbl.loc["momentum_crash", "crisis_max_dd_pct"],
+                     "vol_spike_dd_pct": tbl.loc["vol_spike", "crisis_max_dd_pct"]})
+    df = pd.DataFrame(rows).set_index("variant")
+    console.print(f"Crash protection — {strategy} ({universe})")
+    console.print(df)
+    on, off = df.loc["protection_on"], df.loc["protection_off"]
+    helps = float(on["momentum_crash_dd_pct"]) > float(off["momentum_crash_dd_pct"])
+    keeps = float(on["normal_full_return_pct"]) >= float(off["normal_full_return_pct"]) * 0.85
+    verdict = ("[green]ADOPT[/green]" if helps and keeps
+               else "[yellow]DO NOT default[/yellow]")
+    console.print(f"protection improves crash DD: {helps} | preserves normal return: {keeps} "
+                  f"-> {verdict}")
+    out = settings.reports_dir / f"crash_protection_{strategy}_{universe}.md"
+    out.write_text(f"# Crash protection — {strategy} ({universe})\n\n{df.to_markdown()}\n\n"
+                   f"Adopt as default: {helps and keeps}\n", encoding="utf-8")
+    console.print(f"[green]Report:[/green] {out}")
+
+
+@app.command("crisis-report")
+def crisis_report(
+    strategy: str = typer.Option("long_only_xsec_momentum"),
+    universe: str = typer.Option("us_stocks_50"),
+    interval: str = typer.Option("1d"),
+) -> None:
+    """Crisis-test + crash-protection summary in one report."""
+    crisis_test(strategy=strategy, universe=universe, interval=interval)
+    crash_protection_backtest(strategy=strategy, universe=universe, interval=interval)
+
+
 registry_app = typer.Typer(no_args_is_help=True, help="Alpha registry: list, promote, reject, retire.")
 app.add_typer(registry_app, name="alpha-registry")
 
