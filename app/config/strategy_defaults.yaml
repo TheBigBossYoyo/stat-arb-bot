@@ -205,6 +205,13 @@ daily:
     slippage_bps: 3             # ~5bps per leg round trip on liquid names
     commission_bps: 2
     target_spread_vol: 0.04     # daily spreads are wider than 15m spreads
+    # financing (audit W-07): a market-neutral or levered equity book pays
+    # these in reality. Conservative 2026 retail defaults; a true institutional
+    # book borrows cheaper on GC names but pays far more on hard-to-borrow
+    # momentum losers (exactly the short decile). 0 = NOT modeled (dishonest
+    # for short/levered books) — set them for any result you intend to cite.
+    borrow_bps_annual: 75       # ~0.75%/yr blended GC borrow on the short notional
+    margin_bps_annual: 700      # ~7%/yr margin interest on leverage above 1x
   walk_forward:
     train_bars: 504             # two years in-sample
     test_bars: 126              # six months out-of-sample

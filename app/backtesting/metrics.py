@@ -82,6 +82,7 @@ def compute_metrics(
         "best_trade_pnl": round(float(pnls.max()), 4) if len(pnls) else None,
         "avg_holding_bars": round(float(holding.mean()), 2) if len(holding) else None,
         "total_fees": round(float(extras.get("total_fees", 0.0)), 4),
+        "financing_cost": round(float(extras.get("financing_cost", 0.0)), 4),
         "turnover": round(safe_div(float(extras.get("traded_notional", 0.0)), avg_equity), 3),
         "avg_gross_exposure_pct": round(
             100 * safe_div(float(extras.get("avg_gross_exposure", 0.0)), avg_equity), 2

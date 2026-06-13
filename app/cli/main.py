@@ -496,6 +496,7 @@ def backtest_basket(
     adjusted: bool | None = typer.Option(
         None, "--adjusted/--raw",
         help="total-return prices (default: adjusted for daily equity universes)"),
+    fill: str = typer.Option("next_open", help="next_open (honest) | same_close (legacy)"),
 ) -> None:
     """Backtest a cross-sectional basket strategy (PCA residuals, reversal, momentum)."""
     settings, storage = _bootstrap()
@@ -505,6 +506,7 @@ def backtest_basket(
 
     defaults = _strategy_defaults(interval)
     basket_raw = defaults.get("basket", {}) or {}
+    bt_raw = defaults.get("backtest", {}) or {}
     weight_fn = _basket_weight_fn(strategy, defaults, long_only, universe)
 
     use_adjusted = adjusted if adjusted is not None else _default_adjusted(universe, interval)
@@ -517,12 +519,16 @@ def backtest_basket(
         rebalance_every=rebalance_every or int(basket_raw.get("rebalance_every", 24)),
         cost_bps=float(basket_raw.get("cost_bps", 15)),
         bars_per_year=_bars_per_year(universe, interval),
+        fill=fill,
+        borrow_bps_annual=float(bt_raw.get("borrow_bps_annual", 0)),
+        margin_bps_annual=float(bt_raw.get("margin_bps_annual", 0)),
         label=strategy,
     )
     mode_note = " [yellow](long-only: NOT market-neutral)[/yellow]" if long_only else ""
     console.print(f"Basket backtest: [bold]{strategy}[/bold]{mode_note} on "
                   f"{len(prices.symbols)} assets, {len(prices.index)} bars...")
-    result = run_basket_backtest(prices.close, weight_fn, config, aux=prices.aux)
+    result = run_basket_backtest(prices.close, weight_fn, config, aux=prices.aux,
+                                 open_=prices.open)
     storage.save_backtest_run(
         strategy=f"basket_{strategy}{'_long_only' if long_only else ''}", interval=interval,
         start_ts=prices.index[0], end_ts=prices.index[-1],
@@ -545,14 +551,17 @@ def backtest_basket(
 
 
 def _build_ensemble(sleeves: str | None, defaults: dict, long_only: bool,
-                    universe: str, interval: str, leverage: float, reb_every: int):
+                    universe: str, interval: str, leverage: float, reb_every: int,
+                    alloc_mode: str | None = None):
     """Risk-parity ensemble from strategy_defaults.yaml (shared by the
     ensemble backtest and the basket paper trader)."""
     from app.core.math_utils import periods_per_year
     from app.strategies.ensemble import EnsembleConfig, RiskParityEnsemble
 
     basket_raw = defaults.get("basket", {}) or {}
-    ens_raw = defaults.get("ensemble", {}) or {}
+    ens_raw = dict(defaults.get("ensemble", {}) or {})
+    if alloc_mode:
+        ens_raw["alloc_mode"] = alloc_mode
     names = ([s.strip() for s in sleeves.split(",") if s.strip()] if sleeves
              else list(ens_raw.get("sleeves", ["pca_stat_arb", "xsec_reversion", "tsmom"])))
     for name in names:
@@ -571,6 +580,7 @@ def _build_ensemble(sleeves: str | None, defaults: dict, long_only: bool,
             cost_bps=float(basket_raw.get("cost_bps", 15)),
             target_vol_pct=float(ens_raw.get("target_vol_pct", 0)),
             rebalances_per_year=bpy / reb_every,
+            alloc_mode=str(ens_raw.get("alloc_mode", "inverse_vol")),
         ),
     )
     return names, ensemble
@@ -591,6 +601,11 @@ def backtest_ensemble(
     adjusted: bool | None = typer.Option(
         None, "--adjusted/--raw",
         help="total-return prices (default: adjusted for daily equity universes)"),
+    fill: str = typer.Option("next_open", help="next_open (honest) | same_close (legacy)"),
+    borrow_bps: float | None = typer.Option(
+        None, help="annual borrow cost on short notional (overrides config)"),
+    margin_bps: float | None = typer.Option(
+        None, help="annual margin interest on leverage above 1x (overrides config)"),
 ) -> None:
     """Backtest a risk-parity ensemble of basket strategies (multi-strat style).
 
@@ -604,6 +619,7 @@ def backtest_ensemble(
 
     defaults = _strategy_defaults(interval)
     basket_raw = defaults.get("basket", {}) or {}
+    bt_raw = defaults.get("backtest", {}) or {}
     ens_raw = defaults.get("ensemble", {}) or {}
     reb_every = rebalance_every or int(basket_raw.get("rebalance_every", 24))
     names, ensemble = _build_ensemble(sleeves, defaults, long_only, universe,
@@ -618,12 +634,21 @@ def backtest_ensemble(
         rebalance_every=reb_every,
         cost_bps=float(basket_raw.get("cost_bps", 15)),
         bars_per_year=_bars_per_year(universe, interval),
+        fill=fill,
+        borrow_bps_annual=(borrow_bps if borrow_bps is not None
+                           else float(bt_raw.get("borrow_bps_annual", 0))),
+        margin_bps_annual=(margin_bps if margin_bps is not None
+                           else float(bt_raw.get("margin_bps_annual", 0))),
         label="ensemble",
     )
+    if leverage > 1.0 and config.margin_bps_annual == 0:
+        console.print("[yellow]leverage > 1x with margin_bps=0: financing NOT modeled "
+                      "(audit W-07). Pass --margin-bps for an honest levered result.[/yellow]")
     mode_note = " [yellow](long-only: NOT market-neutral)[/yellow]" if long_only else ""
     console.print(f"Ensemble backtest: [bold]{' + '.join(names)}[/bold]{mode_note} on "
                   f"{len(prices.symbols)} assets, {len(prices.index)} bars...")
-    result = run_basket_backtest(prices.close, ensemble, config, aux=prices.aux)
+    result = run_basket_backtest(prices.close, ensemble, config, aux=prices.aux,
+                                 open_=prices.open)
     storage.save_backtest_run(
         strategy=f"ensemble_{'_'.join(names)}{'_long_only' if long_only else ''}",
         interval=interval, start_ts=prices.index[0], end_ts=prices.index[-1],
@@ -646,6 +671,201 @@ def backtest_ensemble(
                   f"{ {k: round(v, 3) for k, v in ensemble.sleeve_allocations().items()} }")
     for warning in result.warnings:
         console.print(f"[dim]- {warning}[/dim]")
+
+
+def _ensemble_price_setup(storage, sleeves, universe, interval, long_only,
+                          leverage, alloc_mode):
+    """Shared setup for the validation commands: build prices + a fresh-ensemble
+    factory + config (sleeves are stateful — each run needs its own instance)."""
+    from app.backtesting.basket_engine import BasketConfig
+    from app.data.market_data import build_price_matrix
+    from app.data.universe import get_universe
+
+    defaults = _strategy_defaults(interval)
+    basket_raw = defaults.get("basket", {}) or {}
+    bt_raw = defaults.get("backtest", {}) or {}
+    reb_every = int(basket_raw.get("rebalance_every", 24))
+    use_adjusted = _default_adjusted(universe, interval)
+    prices = build_price_matrix(storage, get_universe(universe), interval, adjusted=use_adjusted)
+    _print_adjustment_status(prices, universe, interval)
+
+    def factory():
+        _, ens = _build_ensemble(sleeves, defaults, long_only, universe,
+                                 interval, leverage, reb_every, alloc_mode=alloc_mode)
+        return ens
+
+    names, _ = _build_ensemble(sleeves, defaults, long_only, universe, interval,
+                               leverage, reb_every, alloc_mode=alloc_mode)
+    config = BasketConfig(
+        interval=interval, fit_window=int(basket_raw.get("fit_window", 1500)),
+        rebalance_every=reb_every, cost_bps=float(basket_raw.get("cost_bps", 15)),
+        bars_per_year=_bars_per_year(universe, interval), fill="next_open",
+        borrow_bps_annual=float(bt_raw.get("borrow_bps_annual", 0)),
+        margin_bps_annual=float(bt_raw.get("margin_bps_annual", 0)),
+        label="ensemble",
+    )
+    return prices, factory, config, names
+
+
+@app.command("validate-ensemble")
+def validate_ensemble(
+    sleeves: str | None = typer.Option(None),
+    universe: str = typer.Option("us_stocks_50"),
+    interval: str = typer.Option("1d"),
+    n_folds: int = typer.Option(4),
+    alloc_mode: str | None = typer.Option(None, help="inverse_vol|erc|hrp|equal|min_variance"),
+) -> None:
+    """Out-of-sample validation for the basket ensemble (audit W-01): anchored
+    walk-forward, stress suite, return concentration, and deflated Sharpe vs the
+    family's recorded trial count. This is the gate the flagship had no path to."""
+    settings, storage = _bootstrap()
+    from app.backtesting.basket_engine import run_basket_backtest
+    from app.backtesting.stress_tests import (
+        return_concentration,
+        run_basket_stress_suite,
+    )
+    from app.backtesting.walk_forward import run_basket_holdout
+    from app.core.math_utils import periods_per_year
+    from app.research.deflated_sharpe import deflated_sharpe_from_trials
+    from app.research.experiment_tracking import ExperimentTracker
+
+    prices, factory, config, names = _ensemble_price_setup(
+        storage, sleeves, universe, interval, False, 1.0, alloc_mode)
+    console.print(f"Validating ensemble [bold]{' + '.join(names)}[/bold] "
+                  f"(alloc={alloc_mode or 'inverse_vol'})...")
+
+    wf = run_basket_holdout(prices.close, factory, config, n_folds=n_folds,
+                            aux=prices.aux, open_=prices.open)
+    console.print("\n[bold]Anchored walk-forward[/bold]")
+    for key, value in wf.summary.items():
+        console.print(f"  {key}: {value}")
+
+    stress = run_basket_stress_suite(prices.close, factory, config,
+                                     aux=prices.aux, open_=prices.open)
+    console.print("\n[bold]Stress suite[/bold]")
+    console.print(stress)
+
+    full = run_basket_backtest(prices.close, factory(), config,
+                               aux=prices.aux, open_=prices.open)
+    conc = return_concentration(full.equity)
+    console.print(f"\n[bold]Concentration[/bold]: {conc}")
+
+    ppy = _bars_per_year(universe, interval) or periods_per_year(interval)
+    rets = full.equity.dropna().pct_change().dropna().to_numpy()
+    family = ExperimentTracker.make_family(f"ensemble_{'_'.join(sorted(names))}",
+                                           universe, interval)
+    trial_sharpes = storage.experiment_family_sharpes(family)
+    dsr = deflated_sharpe_from_trials(rets, trial_sharpes or [], periods_per_year=ppy)
+    console.print("\n[bold]Deflated Sharpe[/bold]")
+    console.print(f"  {dsr.summary()}")
+    console.print(f"  family '{family}' has {len(trial_sharpes)} recorded trials")
+
+    # honest pass/fail against acceptance criteria
+    checks = {
+        "OOS folds majority positive": wf.summary.get("oos_folds_positive", 0) * 2
+        >= wf.summary.get("oos_folds", 1),
+        "survives costs_x2 (positive)": float(stress.loc["costs_x2", "total_return_pct"] or 0) > 0,
+        "no month > 25% of PnL": (conc.get("max_month_pct") or 0) <= 25.0,
+        "deflated Sharpe P>0.95": dsr.passed,
+    }
+    console.print("\n[bold]Acceptance checks[/bold]")
+    for name, ok in checks.items():
+        console.print(f"  [{'green' if ok else 'red'}]{'PASS' if ok else 'FAIL'}[/] {name}")
+    out = settings.reports_dir / f"validate_ensemble_{universe}_{interval}.md"
+    _write_validation_report(out, names, universe, interval, wf, stress, conc, dsr, checks)
+    console.print(f"\n[green]Report:[/green] {out}")
+
+
+def _write_validation_report(path, names, universe, interval, wf, stress, conc, dsr, checks):
+    lines = [
+        f"# Ensemble validation — {' + '.join(names)} ({universe}, {interval})",
+        "", "## Anchored walk-forward (audit W-01)",
+        *(f"- {k}: {v}" for k, v in wf.summary.items()),
+        "", "## Stress suite", "", stress.to_markdown(),
+        "", "## Return concentration", *(f"- {k}: {v}" for k, v in conc.items()),
+        "", "## Deflated Sharpe", f"- {dsr.summary()}",
+        "", "## Acceptance checks",
+        *(f"- {'PASS' if ok else 'FAIL'} — {name}" for name, ok in checks.items()),
+        "",
+    ]
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+@app.command("capacity-report")
+def capacity_report(
+    strategy: str = typer.Option("xsec_momentum"),
+    universe: str = typer.Option("us_stocks_50"),
+    interval: str = typer.Option("1d"),
+    capital_grid: str = typer.Option("10000,50000,250000,1000000,5000000,25000000"),
+    impact_coeff: float = typer.Option(10.0, help="bps per sqrt(participation)"),
+) -> None:
+    """Capacity curve: net Sharpe vs capital with square-root market impact (W-09)."""
+    settings, storage = _bootstrap()
+    from app.backtesting.basket_engine import BasketConfig
+    from app.backtesting.capacity import run_capacity_analysis
+    from app.data.market_data import build_price_matrix
+    from app.data.universe import get_universe
+
+    defaults = _strategy_defaults(interval)
+    basket_raw = defaults.get("basket", {}) or {}
+    weight_fn = _basket_weight_fn(strategy, defaults, False, universe)
+    use_adjusted = _default_adjusted(universe, interval)
+    prices = build_price_matrix(storage, get_universe(universe), interval, adjusted=use_adjusted)
+    grid = [float(x) for x in capital_grid.split(",")]
+    config = BasketConfig(
+        interval=interval, fit_window=int(basket_raw.get("fit_window", 1500)),
+        rebalance_every=int(basket_raw.get("rebalance_every", 24)),
+        cost_bps=float(basket_raw.get("cost_bps", 15)),
+        bars_per_year=_bars_per_year(universe, interval), fill="next_open", label=strategy,
+    )
+    if prices.volume is None:
+        console.print("[yellow]No volume data — impact cannot be estimated; "
+                      "capacity curve will be flat (uninformative).[/yellow]")
+    curve = run_capacity_analysis(prices.close, weight_fn, config, grid,
+                                  aux=prices.aux, open_=prices.open,
+                                  volume=prices.volume, impact_coeff=impact_coeff)
+    console.print(f"Capacity — [bold]{strategy}[/bold] on {universe}")
+    console.print(curve.to_frame())
+    console.print(f"Liquidity bottlenecks: {curve.bottleneck_symbols}")
+    console.print(f"Capacity at 80% Sharpe floor: "
+                  f"${curve.capacity_at_sharpe_floor():,.0f}")
+
+
+@app.command("compare-allocators")
+def compare_allocators(
+    sleeves: str | None = typer.Option(None),
+    universe: str = typer.Option("us_stocks_50"),
+    interval: str = typer.Option("1d"),
+    modes: str = typer.Option("equal,inverse_vol,erc,hrp"),
+) -> None:
+    """Compare allocation modes for the ensemble on the SAME data (audit W-11).
+
+    A new mode must beat inverse_vol here (and out-of-sample, via
+    validate-ensemble) before it should become the configured default."""
+    _, storage = _bootstrap()
+    from app.backtesting.basket_engine import run_basket_backtest
+
+    rows = []
+    for mode in [m.strip() for m in modes.split(",") if m.strip()]:
+        prices, factory, config, names = _ensemble_price_setup(
+            storage, sleeves, universe, interval, False, 1.0, mode)
+        res = run_basket_backtest(prices.close, factory(), config,
+                                  aux=prices.aux, open_=prices.open)
+        rows.append({"mode": mode, "return_pct": res.metrics.get("total_return_pct"),
+                     "sharpe": res.metrics.get("sharpe"),
+                     "max_dd_pct": res.metrics.get("max_drawdown_pct"),
+                     "turnover": res.metrics.get("turnover")})
+    import pandas as pd
+
+    table = pd.DataFrame(rows).set_index("mode")
+    console.print(f"Allocator comparison — {' + '.join(names)} ({universe})")
+    console.print(table)
+    best = table["sharpe"].astype(float).idxmax()
+    iv = table.loc["inverse_vol", "sharpe"] if "inverse_vol" in table.index else None
+    console.print(f"Best Sharpe: [bold]{best}[/bold]"
+                  + (f" (inverse_vol: {iv})" if iv is not None else ""))
+    console.print("[dim]In-sample only — confirm OOS with validate-ensemble before "
+                  "changing the default (acceptance criteria).[/dim]")
 
 
 @app.command("paper-trade-basket")

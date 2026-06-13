@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
+from app.backtesting.basket_engine import BasketConfig, run_basket_backtest
 from app.backtesting.engine import BacktestConfig, BacktestEngine, BacktestResult
 from app.core.logging import get_logger
 from app.core.math_utils import safe_div
@@ -132,3 +133,86 @@ def run_walk_forward(
         ),
     }
     return WalkForwardResult(windows=windows, oos_equity=oos_equity, summary=summary)
+
+
+# --- basket / ensemble out-of-sample validation (audit W-01) ---------------------
+
+
+@dataclass
+class BasketWalkForwardResult:
+    is_metrics: dict
+    oos_metrics: dict
+    folds: list[dict] = field(default_factory=list)
+    summary: dict = field(default_factory=dict)
+
+
+def run_basket_holdout(
+    close: pd.DataFrame,
+    weight_fn_factory: Callable[[], object],
+    config: BasketConfig,
+    *,
+    n_folds: int = 4,
+    aux: dict | None = None,
+    open_=None,
+) -> BasketWalkForwardResult:
+    """Anchored walk-forward for a stateful basket strategy.
+
+    The flagship lives on the basket engine, which had NO out-of-sample path
+    (audit W-01). Strategies already retrain inside their window, so the bias
+    this exposes is CONFIG selection: a sleeve set / allocator tuned on the
+    whole window will degrade on the later folds it never informed.
+
+    We split the post-warmup span into `n_folds` contiguous test blocks. For
+    each block we run the strategy on [start .. block_end] (a fresh stateful
+    instance) and attribute the block's segment of the equity curve as that
+    fold's OOS performance. Fold 0 (still partly warmup-bound) is reported but
+    excluded from the OOS aggregate.
+    """
+    from app.backtesting.metrics import compute_metrics
+
+    n = len(close)
+    usable = n - config.fit_window
+    if usable < n_folds * 5:
+        raise ValueError(f"need >= {n_folds * 5} bars past the fit window, have {usable}")
+    bounds = [config.fit_window + (usable * k) // n_folds for k in range(n_folds + 1)]
+
+    folds: list[dict] = []
+    oos_segments: list[pd.Series] = []
+    is_sharpes, oos_sharpes = [], []
+    for k in range(n_folds):
+        end = bounds[k + 1]
+        sub = close.iloc[:end]
+        sub_aux = ({name: df.iloc[:end] for name, df in aux.items()} if aux else None)
+        sub_open = open_.iloc[:end] if open_ is not None else None
+        res = run_basket_backtest(sub, weight_fn_factory(), config,
+                                  aux=sub_aux, open_=sub_open)
+        eq = res.equity.dropna()
+        block = eq.loc[close.index[bounds[k]]: close.index[end - 1]]
+        is_sharpes.append(res.metrics.get("sharpe") or 0.0)
+        fold_metrics = compute_metrics(
+            block, [], interval=config.interval, starting_cash=float(block.iloc[0]),
+            bars_per_year=config.bars_per_year,
+        ) if len(block) > 2 else {}
+        folds.append({"fold": k, "test_start": str(close.index[bounds[k]]),
+                      "test_end": str(close.index[end - 1]),
+                      "sharpe": fold_metrics.get("sharpe"),
+                      "return_pct": fold_metrics.get("total_return_pct")})
+        if k >= 1 and len(block) > 2:
+            oos_sharpes.append(fold_metrics.get("sharpe") or 0.0)
+            oos_segments.append(block / float(block.iloc[0]))
+
+    full = run_basket_backtest(close, weight_fn_factory(), config, aux=aux, open_=open_)
+    oos_mean = float(pd.Series(oos_sharpes).mean()) if oos_sharpes else 0.0
+    is_mean = float(pd.Series(is_sharpes).mean()) if is_sharpes else 0.0
+    summary = {
+        "n_folds": n_folds,
+        "full_sample_sharpe": full.metrics.get("sharpe"),
+        "oos_sharpe_mean": round(oos_mean, 3),
+        "oos_folds_positive": sum(1 for s in oos_sharpes if s > 0),
+        "oos_folds": len(oos_sharpes),
+        "sharpe_degradation": round(safe_div(is_mean - oos_mean, abs(is_mean), default=0.0), 3),
+    }
+    return BasketWalkForwardResult(
+        is_metrics=full.metrics, oos_metrics={"oos_sharpe_mean": oos_mean},
+        folds=folds, summary=summary,
+    )

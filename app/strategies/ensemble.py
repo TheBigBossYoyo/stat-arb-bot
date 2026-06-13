@@ -58,6 +58,12 @@ class EnsembleConfig(BaseModel):
     # cap alone cannot lever). RESEARCH ONLY: margin and borrow costs are not
     # modeled; turnover costs do scale with it.
     leverage: float = 1.0
+    # how surviving sleeves (those past the t-stat gate) share risk:
+    # inverse_vol (default, current behaviour) | erc | hrp | equal | min_variance.
+    # erc/hrp use the sleeve-return covariance the inverse-vol shortcut ignores
+    # (audit W-11). A non-default mode must beat inverse_vol OOS net of turnover
+    # before it becomes the configured default (STRATEGY_ACCEPTANCE_CRITERIA).
+    alloc_mode: str = "inverse_vol"
 
 
 class RiskParityEnsemble:
@@ -89,28 +95,50 @@ class RiskParityEnsemble:
         names = list(self.sleeves)
         if any(len(self._returns[n]) < cfg.min_observations for n in names):
             return {n: 1.0 / len(names) for n in names}
-        inv_vol = {}
+        # 1) trailing-performance GATE: a bleeding sleeve gets zero (unchanged).
+        gated: list[str] = []
+        t_scale_weight: dict[str, float] = {}
         for n in names:
             rets = np.fromiter(self._returns[n], dtype=float)
             vol = float(np.std(rets, ddof=1))
             if vol <= 1e-12:
-                inv_vol[n] = 0.0
                 continue
             t_stat = float(rets.mean()) / (vol / np.sqrt(len(rets)))
             if t_stat < cfg.min_sleeve_t:
-                inv_vol[n] = 0.0
-            elif cfg.t_stat_scale > 0:
-                inv_vol[n] = (1.0 / vol) * min(max(t_stat, 0.0) / cfg.t_stat_scale, 1.0)
-            else:
-                inv_vol[n] = 1.0 / vol
-        total = sum(inv_vol.values())
-        if total <= 0:
+                continue
+            gated.append(n)
+            t_scale_weight[n] = (min(max(t_stat, 0.0) / cfg.t_stat_scale, 1.0)
+                                 if cfg.t_stat_scale > 0 else 1.0)
+        if not gated:
             return {n: 0.0 for n in names}     # nothing has edge: hold cash
-        shares = {n: v / total for n, v in inv_vol.items()}
-        # cap any sleeve's share and re-normalize the remainder
+        # 2) RISK SHARING among survivors via the chosen allocator.
+        shares = self._risk_shares(gated)
+        for n in gated:                        # optional continuous t-stat taper
+            shares[n] *= t_scale_weight[n]
+        total = sum(shares.values())
+        if total <= 0:
+            return {n: 0.0 for n in names}
+        shares = {n: v / total for n, v in shares.items()}
         capped = {n: min(s, cfg.max_sleeve_share) for n, s in shares.items()}
         total = sum(capped.values())
-        return {n: s / total for n, s in capped.items()}
+        out = {n: capped.get(n, 0.0) / total for n in names}
+        return out
+
+    def _risk_shares(self, survivors: list[str]) -> dict[str, float]:
+        """Risk shares among gate-surviving sleeves under cfg.alloc_mode."""
+        cfg = self.cfg
+        if cfg.alloc_mode == "inverse_vol" or len(survivors) == 1:
+            inv = {}
+            for n in survivors:
+                vol = float(np.std(np.fromiter(self._returns[n], dtype=float), ddof=1))
+                inv[n] = 1.0 / vol if vol > 1e-12 else 0.0
+            return inv
+        # build an aligned sleeve-return frame (deques are equal length once warm)
+        frame = pd.DataFrame({n: list(self._returns[n]) for n in survivors})
+        from app.portfolio.optimizer import allocate
+
+        weights = allocate(frame, mode=cfg.alloc_mode)
+        return {n: float(weights.get(n, 0.0)) for n in survivors}
 
     def _update_sleeve_returns(self, close_window: pd.DataFrame) -> None:
         """Realize each sleeve's return since the previous rebalance using the
