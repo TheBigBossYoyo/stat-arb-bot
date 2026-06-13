@@ -2554,6 +2554,116 @@ def futures_readiness(
 
 
 # --------------------------------------------------------------------------------
+# Phase 3 — point-in-time / survivorship-bias bound
+# --------------------------------------------------------------------------------
+
+@app.command("universe-audit")
+def universe_audit(universe: str = typer.Option("us_stocks_50")) -> None:
+    """Universe bias status + how to bound it (Phase 3, blocker #9)."""
+    _, _ = _bootstrap()
+    from app.data.universe import get_universe, get_universe_meta
+
+    meta = get_universe_meta(universe)
+    biased = meta.survivorship != "point_in_time"
+    color = "red" if biased else "green"
+    console.print(f"[bold]Universe audit — {universe}[/bold]")
+    console.print(f"  members: {len(get_universe(universe))}")
+    console.print(f"  asset class: {meta.asset_class}")
+    console.print(f"  survivorship: [{color}]{meta.survivorship}[/{color}] — {meta.selection_note}")
+    if biased:
+        console.print("[yellow]SURVIVORSHIP-BIASED: today's survivors backtested into "
+                      "the past. No point-in-time constituent feed is integrated. Bound "
+                      "the bias with `survivorship-stress`; results are viability checks, "
+                      "not evidence, until a PIT feed exists.[/yellow]")
+
+
+def _survivorship_run_factory(strategy, universe, interval):
+    """run_on_symbols(symbols)->metrics, for the survivorship stress."""
+    settings, storage = _bootstrap()
+    from app.backtesting.basket_engine import BasketConfig, run_basket_backtest
+    from app.backtesting.long_only_engine import _long_only_guard
+    from app.data.market_data import build_price_matrix
+
+    defaults = _strategy_defaults(interval)
+    basket_raw = defaults.get("basket", {}) or {}
+    reb_every = 5 if strategy.startswith("long_only") else int(basket_raw.get("rebalance_every", 1))
+    use_adjusted = _default_adjusted(universe, interval)
+
+    def run_on_symbols(symbols):
+        prices = build_price_matrix(storage, symbols, interval, adjusted=use_adjusted, min_rows=60)
+        config = BasketConfig(
+            interval=interval, fit_window=int(basket_raw.get("fit_window", 300)),
+            rebalance_every=reb_every, cost_bps=float(basket_raw.get("cost_bps", 5)),
+            bars_per_year=_bars_per_year(universe, interval), fill="next_open", label="surv")
+        if strategy.startswith("long_only"):
+            rc = _regime_cfg(True, 0.0)
+            fn, _ = _build_long_only(strategy, defaults, universe, interval, rc, reb_every)
+            fn = _long_only_guard(fn, 0.20, 1.0)
+        else:
+            _, fn = _build_ensemble(None, defaults, False, universe, interval, 1.0, reb_every)
+        return run_basket_backtest(prices.close, fn, config, aux=prices.aux,
+                                   open_=prices.open).metrics
+    return run_on_symbols
+
+
+@app.command("survivorship-stress")
+def survivorship_stress(
+    strategy: str = typer.Option("long_only_xsec_momentum"),
+    universe: str = typer.Option("us_stocks_50"),
+    interval: str = typer.Option("1d"),
+    n: int = typer.Option(10, help="random sub-universes"),
+    drop_frac: float = typer.Option(0.2, help="fraction of names dropped per sub-universe"),
+) -> None:
+    """Bound survivorship bias by perturbing the universe (Phase 3).
+
+    Runs the strategy on the full universe and `n` random sub-universes. If the
+    Sharpe is stable when names are dropped, the edge does not depend on the
+    exact survivor set and the bias is bounded."""
+    settings, _ = _bootstrap()
+    from app.backtesting.survivorship import run_survivorship_stress
+
+    console.print(f"Survivorship stress: [bold]{strategy}[/bold] on {universe} "
+                  f"({n} sub-universes, drop {drop_frac:.0%})...")
+    run_fn = _survivorship_run_factory(strategy, universe, interval)
+    res = run_survivorship_stress(universe, run_fn, n=n, drop_frac=drop_frac)
+    table = Table(title="Survivorship stress")
+    table.add_column("metric")
+    table.add_column("value", justify="right")
+    for k, v in res.summary().items():
+        table.add_row(k, str(v))
+    console.print(table)
+    color = "green" if res.bounded else "red"
+    console.print(f"survivorship risk: [{color}]{'BOUNDED' if res.bounded else 'NOT BOUNDED'}[/] "
+                  f"(5th-pct sub-universe Sharpe {res.sharpe_p05:.2f} vs full {res.full_sharpe:.2f})")
+    out = settings.reports_dir / f"survivorship_{strategy}_{universe}.md"
+    out.write_text(f"# Survivorship stress — {strategy} ({universe}, {interval})\n\n"
+                   + "\n".join(f"- {k}: {v}" for k, v in res.summary().items()) + "\n",
+                   encoding="utf-8")
+    console.print(f"[green]Report:[/green] {out}")
+
+
+@app.command("point-in-time-backtest")
+def point_in_time_backtest(
+    strategy: str = typer.Option("long_only_xsec_momentum"),
+    universe: str = typer.Option("us_stocks_50"),
+    interval: str = typer.Option("1d"),
+) -> None:
+    """Attempt a point-in-time backtest; fall back to the survivorship bound.
+
+    No index-constituent history is integrated, so a true PIT backtest is not
+    possible — this states that honestly and runs the perturbation bound instead
+    (never fakes point-in-time membership)."""
+    from app.data.point_in_time import UnavailablePITProvider
+
+    try:
+        UnavailablePITProvider().members_as_of("SP500", utc_now())
+    except NotImplementedError as exc:
+        console.print(f"[yellow]{exc}[/yellow]")
+    console.print("[dim]Falling back to the survivorship bound...[/dim]\n")
+    survivorship_stress(strategy=strategy, universe=universe, interval=interval)
+
+
+# --------------------------------------------------------------------------------
 # Phase 4 — crisis-regime + crash-protection testing
 # --------------------------------------------------------------------------------
 
