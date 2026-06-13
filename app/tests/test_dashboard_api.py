@@ -64,6 +64,39 @@ def test_institutional_read_endpoints(tmp_path):
     assert any(g["name"] == "venue_gate" for g in body["gates"])
 
 
+def test_tradability_dashboard_endpoints(tmp_path):
+    """Phase 7 product/tradability surface is read-only and never live-eligible."""
+    client, _, _ = make_client(tmp_path)
+
+    decision = client.get("/api/product-decision")
+    assert decision.status_code == 200
+    body = decision.json()
+    assert body["live_eligible"] is False
+    assert {p["product"] for p in body["products"]} == {
+        "market_neutral_equity", "long_only_equity", "crypto_futures"}
+    mn = next(p for p in body["products"] if p["product"] == "market_neutral_equity")
+    assert mn["status"] == "do_not_trade" and mn["venue_wired"] is False
+
+    matrix = client.get("/api/tradability-matrix")
+    assert matrix.status_code == 200
+    assert matrix.json()["live_eligible_any"] is False
+
+    blockers = client.get("/api/blockers")
+    assert blockers.status_code == 200
+    assert any("shorting venue" in b for b in blockers.json()["global"])
+
+    live = client.get("/api/live-readiness")
+    assert live.status_code == 200 and live.json()["live_eligible"] is False
+
+    # deflated Sharpe backfills the historical trials, so the equity group is large
+    ds = client.get("/api/deflated-sharpe")
+    assert ds.status_code == 200
+    assert ds.json()["n_trials"] >= 40
+
+    crisis = client.get("/api/crisis/long_only_xsec_momentum")
+    assert crisis.status_code == 200            # available False on a fresh reports dir
+
+
 def test_controls_disabled_blocks_dangerous_posts(tmp_path):
     client, _, storage = make_client(tmp_path, controls=False)
     response = client.post("/api/risk/kill-switch/activate",

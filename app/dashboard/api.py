@@ -220,6 +220,94 @@ def create_app(settings: Settings | None = None, storage: Storage | None = None,
                 "gates": [{"name": r.name, "status": r.status, "detail": r.detail,
                            "blocking": r.blocking} for r in report.results]}
 
+    # ---- tradability / product dashboard (Phase 7) ---------------------------------
+
+    def _product_dict(p):
+        return {"product": p.product_id, "name": p.name, "venue": p.venue,
+                "asset_class": p.asset_class, "shorting": p.requires_short,
+                "leverage": p.requires_leverage, "venue_wired": p.venue_connected,
+                "venue_kind": p.venue_kind, "gates_passed": p.gates_passed,
+                "gates_total": p.gates_total, "status": p.status,
+                "eligible_label": p.eligible_label, "risk": p.risk_level,
+                "missing": p.missing, "notes": p.notes, "live_eligible": False}
+
+    @app.get("/api/product-decision", dependencies=dep)
+    def product_decision_view():
+        """The operator decision: lead product, action, capital stage. Never live."""
+        from app.research.product_decision import evaluate_products
+
+        d = evaluate_products(settings, storage)
+        return {"headline": d.headline, "recommended": d.recommended,
+                "action": d.action, "capital_stage": d.capital_stage,
+                "live_eligible": False, "products": [_product_dict(p) for p in d.products]}
+
+    @app.get("/api/tradability-matrix", dependencies=dep)
+    def tradability_matrix_view():
+        """Rows = product paths, columns = gate/venue status. live_eligible all False."""
+        from app.research.product_decision import evaluate_products
+
+        d = evaluate_products(settings, storage)
+        return {"rows": [_product_dict(p) for p in d.products], "live_eligible_any": False}
+
+    @app.get("/api/blockers", dependencies=dep)
+    def blockers_view():
+        """Current blockers: per-product missing gates + the global blocker list."""
+        from app.research.product_decision import evaluate_products
+
+        d = evaluate_products(settings, storage)
+        per_product = [{"product": p.product_id, "blocker": m}
+                       for p in d.products for m in p.missing]
+        return {"per_product": per_product, "global": [
+            "no shorting venue connected (market-neutral has no home)",
+            "return-concentration gate (long-only & futures just over 25%/month)",
+            "survivorship bias (bounded via perturbation, not eliminated)",
+            "crisis regime tested synthetically only (no real 2008/2020 crash)",
+            "deflated Sharpe FAILS for the market-neutral flagship",
+            "no forward supervised paper/testnet period yet",
+            "production hardening incomplete"]}
+
+    @app.get("/api/live-readiness", dependencies=dep)
+    def live_readiness_view():
+        """Live-readiness gate: always NOT LIVE ELIGIBLE, with the per-product standing."""
+        from app.research.product_decision import evaluate_products
+
+        d = evaluate_products(settings, storage)
+        return {"live_eligible": False, "headline": d.headline,
+                "products": [{"product": p.product_id, "status": p.status,
+                              "eligible_label": p.eligible_label,
+                              "gates": f"{p.gates_passed}/{p.gates_total}"}
+                             for p in d.products]}
+
+    @app.get("/api/deflated-sharpe", dependencies=dep)
+    def deflated_sharpe_view(group: str = "equity_daily_book_selection"):
+        """Trial-family count + Sharpe distribution feeding the deflated Sharpe."""
+        from app.research.trial_backfill import backfill_trials, group_stats
+
+        backfill_trials(storage)
+        gs = group_stats(storage, group)
+        report = settings.reports_dir / f"deflated_sharpe_{group}.md"
+        return {"group": group, "n_trials": gs.n_trials, "with_sharpe": len(gs.sharpes),
+                "best_sharpe": gs.best_sharpe, "mean_sharpe": gs.mean_sharpe,
+                "std_sharpe": gs.std_sharpe,
+                "report": report.read_text(encoding="utf-8") if report.exists() else ""}
+
+    @app.get("/api/concentration/{strategy}", dependencies=dep)
+    def concentration_view(strategy: str, universe: str = "us_stocks_50"):
+        """Latest concentration report for a strategy/universe (markdown)."""
+        matches = sorted((settings.reports_dir).glob(f"concentration_*{universe}*.md"))
+        if not matches:
+            return {"available": False, "report": "not run; execute `statarb concentration-report`"}
+        return {"available": True, "file": matches[-1].name,
+                "report": matches[-1].read_text(encoding="utf-8")}
+
+    @app.get("/api/crisis/{strategy}", dependencies=dep)
+    def crisis_view(strategy: str, universe: str = "us_stocks_50"):
+        """Crisis-lab report for a strategy/universe (markdown), if generated."""
+        p = settings.reports_dir / f"crisis_{strategy}_{universe}.md"
+        return {"available": p.exists(),
+                "report": p.read_text(encoding="utf-8") if p.exists()
+                else "not run; execute `statarb crisis-test`"}
+
     @app.get("/api/jobs", dependencies=dep)
     def jobs():
         return service.list_jobs()
