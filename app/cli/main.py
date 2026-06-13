@@ -2163,6 +2163,351 @@ def multiple_testing_report(
     console.print(f"[green]Report:[/green] {out}")
 
 
+# --------------------------------------------------------------------------------
+# Path B — Binance USDT-perp crypto futures (research / paper / testnet only)
+# --------------------------------------------------------------------------------
+
+FUTURES_STRATEGIES = ("crypto_tsmom_futures", "funding_carry", "basis_carry",
+                      "funding_adjusted_momentum", "crypto_futures_ensemble")
+
+
+def _load_futures_prices(storage, universe, interval):
+    from app.data.market_data import build_price_matrix
+    from app.data.universe import get_universe
+
+    return build_price_matrix(storage, get_universe(universe), interval,
+                              source="binance_futures", adjusted=False, min_rows=60)
+
+
+def _build_funding_aux(symbols, index, *, quiet=False):
+    """(raw 8h panel for engine P&L, bar-mean panel for signals). Network fetch;
+    returns (None, None) on failure so funding sleeves idle gracefully."""
+    import numpy as np
+
+    from app.data.funding import build_funding_panel
+
+    try:
+        start = index[0].to_pydatetime()
+        end = index[-1].to_pydatetime()
+        raw = build_funding_panel(list(symbols), start, end)
+    except Exception as exc:  # noqa: BLE001
+        if not quiet:
+            console.print(f"[yellow]funding fetch failed ({exc}); funding sleeves idle[/yellow]")
+        return None, None
+    if raw.empty:
+        return None, None
+    bins = index
+    pos = np.searchsorted(bins.values, raw.index.values, side="right") - 1
+    pos = np.clip(pos, 0, len(bins) - 1)
+    bar_mean = raw.groupby(bins[pos]).mean().reindex(index=index, columns=symbols).ffill()
+    return raw, bar_mean
+
+
+def _futures_strategy(strategy: str, record_history: bool = False):
+    from app.strategies.basis_carry import make_basis_carry_weight_fn
+    from app.strategies.crypto_futures_ensemble import build_crypto_futures_ensemble
+    from app.strategies.crypto_tsmom_futures import make_crypto_tsmom_weight_fn
+    from app.strategies.ensemble import EnsembleConfig
+    from app.strategies.funding_adjusted_momentum import make_funding_adjusted_momentum
+    from app.strategies.funding_carry import make_funding_carry_weight_fn
+
+    if strategy == "crypto_tsmom_futures":
+        return make_crypto_tsmom_weight_fn()
+    if strategy == "funding_carry":
+        return make_funding_carry_weight_fn()
+    if strategy == "basis_carry":
+        return make_basis_carry_weight_fn()
+    if strategy == "funding_adjusted_momentum":
+        return make_funding_adjusted_momentum()
+    if strategy == "crypto_futures_ensemble":
+        return build_crypto_futures_ensemble(
+            ensemble_config=EnsembleConfig(vol_window=20, min_observations=5, cost_bps=7.0),
+            record_history=record_history)
+    raise typer.BadParameter(f"unknown futures strategy {strategy!r}; choose from {FUTURES_STRATEGIES}")
+
+
+@app.command("download-futures-data")
+def download_futures_data(
+    universe: str = typer.Option("crypto_top_20"),
+    interval: str = typer.Option("1d"),
+    days: int = typer.Option(1095, min=1),
+) -> None:
+    """Download Binance USDT-perp futures klines (public, no key). Research only."""
+    _, storage = _bootstrap()
+    storage.init_db()
+    from app.data.futures import BinanceFuturesData
+    from app.data.universe import get_universe
+
+    syms = get_universe(universe)
+    console.print(f"Downloading futures klines: {len(syms)} symbols, {interval}, {days}d...")
+    counts = BinanceFuturesData().download(storage, syms, interval, days)
+    table = Table(title=f"Futures download ({interval}, {days}d)")
+    table.add_column("symbol")
+    table.add_column("rows", justify="right")
+    for sym, n in counts.items():
+        table.add_row(sym, str(n))
+    console.print(table)
+
+
+def _futures_config(interval, universe):
+    from app.backtesting.futures_engine import FuturesConfig
+
+    return FuturesConfig(
+        interval=interval, fit_window=150, rebalance_every=1,
+        taker_fee_bps=4.0, slippage_bps=3.0, leverage=1.0, max_leverage=2.0,
+        bars_per_year=365.0, apply_funding=True, label="futures")
+
+
+@app.command("backtest-futures")
+def backtest_futures(
+    strategy: str = typer.Option("crypto_futures_ensemble", help=" | ".join(FUTURES_STRATEGIES)),
+    universe: str = typer.Option("crypto_top_20"),
+    interval: str = typer.Option("1d"),
+) -> None:
+    """Backtest a crypto-futures strategy with fees + funding + leverage cap.
+
+    Research only — no account, no live orders. Funding is fetched from the
+    public API; the basis sleeve idles unless spot data is present."""
+    settings, storage = _bootstrap()
+    from app.backtesting.futures_engine import run_futures_backtest
+
+    prices = _load_futures_prices(storage, universe, interval)
+    raw_funding, funding_aux = _build_funding_aux(prices.symbols, prices.index)
+    fn = _futures_strategy(strategy)
+    aux = dict(prices.aux)
+    if funding_aux is not None:
+        aux["funding"] = funding_aux
+    config = _futures_config(interval, universe)
+    console.print(f"Futures backtest: [bold]{strategy}[/bold] on {len(prices.symbols)} perps, "
+                  f"{len(prices.index)} bars (funding {'on' if raw_funding is not None else 'OFF'})...")
+    result = run_futures_backtest(prices.close, fn, config, funding=raw_funding,
+                                  aux=aux, open_=prices.open)
+    _record_experiment(storage, kind="futures", strategy=strategy, universe=universe,
+                       interval=interval, metrics=result.metrics, prices=prices,
+                       config={"strategy": strategy, "leverage": config.leverage},
+                       notes="crypto futures research; paper/testnet only")
+    table = Table(title=f"Futures metrics — {strategy}")
+    table.add_column("metric")
+    table.add_column("value", justify="right")
+    for key, value in result.metrics.items():
+        table.add_row(key, str(value))
+    console.print(table)
+    console.print(f"funding paid (net): {result.funding_paid:.2f} | "
+                  f"liquidation breaches: {result.n_liquidation_breaches} | "
+                  f"min liq distance: {result.min_liquidation_distance}")
+    for w in result.warnings:
+        console.print(f"[dim]- {w}[/dim]")
+
+
+@app.command("funding-report")
+def funding_report(
+    universe: str = typer.Option("crypto_top_20"),
+    days: int = typer.Option(365),
+) -> None:
+    """Trailing funding-rate APR per perp (the carry landscape)."""
+    _, storage = _bootstrap()
+    from app.data.funding import build_funding_panel, funding_summary
+    from app.data.universe import get_universe
+
+    start = (utc_now() - timedelta(days=days)).replace(tzinfo=None)
+    end = utc_now().replace(tzinfo=None)
+    panel = build_funding_panel(get_universe(universe), start, end)
+    if panel.empty:
+        console.print("[red]No funding history fetched.[/red]")
+        raise typer.Exit(1)
+    summary = funding_summary(panel)
+    console.print(f"Funding report — {universe} ({days}d)")
+    console.print(summary)
+
+
+@app.command("basis-report")
+def basis_report(
+    universe: str = typer.Option("crypto_top_20"),
+    interval: str = typer.Option("1d"),
+) -> None:
+    """Perp-vs-spot basis per symbol (cash-and-carry landscape)."""
+    settings, storage = _bootstrap()
+    from app.data.basis import basis_summary, compute_basis
+    from app.data.market_data import build_price_matrix
+    from app.data.universe import get_universe
+
+    syms = get_universe(universe)
+    try:
+        fut = _load_futures_prices(storage, universe, interval).close
+        spot = build_price_matrix(storage, syms, interval, source="binance",
+                                  adjusted=False, min_rows=60).close
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[yellow]basis needs both futures and spot bars stored: {exc}[/yellow]")
+        raise typer.Exit(1) from exc
+    basis = compute_basis(fut, spot)
+    if basis.empty:
+        console.print("[yellow]No overlapping futures+spot symbols for basis.[/yellow]")
+        raise typer.Exit(1)
+    console.print(f"Basis report — {universe} ({interval})")
+    console.print(basis_summary(basis))
+
+
+@app.command("futures-stress")
+def futures_stress(
+    strategy: str = typer.Option("crypto_futures_ensemble"),
+    universe: str = typer.Option("crypto_top_20"),
+    interval: str = typer.Option("1d"),
+) -> None:
+    """Stress the futures book: higher fees, funding shock, vol spike, leverage."""
+    settings, storage = _bootstrap()
+    import pandas as pd
+
+    from app.backtesting.futures_engine import run_futures_backtest
+
+    prices = _load_futures_prices(storage, universe, interval)
+    raw_funding, funding_aux = _build_funding_aux(prices.symbols, prices.index)
+    aux = dict(prices.aux)
+    if funding_aux is not None:
+        aux["funding"] = funding_aux
+
+    scenarios = {
+        "base": {},
+        "fees_x3": {"taker_fee_bps": 12.0, "slippage_bps": 9.0},
+        "funding_x2": {"funding_mult": 2.0},
+        "leverage_2x": {"leverage": 2.0},
+        "vol_spike": {"return_shock": True},
+    }
+    rows = []
+    for name, sc in scenarios.items():
+        cfg = _futures_config(interval, universe)
+        cfg.taker_fee_bps = sc.get("taker_fee_bps", cfg.taker_fee_bps)
+        cfg.slippage_bps = sc.get("slippage_bps", cfg.slippage_bps)
+        cfg.leverage = sc.get("leverage", cfg.leverage)
+        fund = raw_funding * sc["funding_mult"] if (raw_funding is not None and "funding_mult" in sc) else raw_funding
+        close = prices.close
+        if sc.get("return_shock"):     # widen all returns 2x (vol spike proxy)
+            close = (prices.close.pct_change().fillna(0) * 2.0 + 1.0).cumprod() * prices.close.iloc[0]
+        res = run_futures_backtest(close, _futures_strategy(strategy), cfg,
+                                   funding=fund, aux=aux, open_=prices.open)
+        rows.append({"scenario": name, "return_pct": res.metrics.get("total_return_pct"),
+                     "sharpe": res.metrics.get("sharpe"),
+                     "max_dd_pct": res.metrics.get("max_drawdown_pct"),
+                     "liq_breaches": res.n_liquidation_breaches,
+                     "min_liq_dist": res.min_liquidation_distance})
+    df = pd.DataFrame(rows).set_index("scenario")
+    console.print(f"Futures stress — {strategy} ({universe})")
+    console.print(df)
+    out = settings.reports_dir / f"futures_stress_{strategy}_{universe}.md"
+    out.write_text(f"# Futures stress — {strategy} ({universe})\n\n{df.to_markdown()}\n",
+                   encoding="utf-8")
+    console.print(f"[green]Report:[/green] {out}")
+
+
+@app.command("futures-paper")
+def futures_paper(
+    strategy: str = typer.Option("crypto_futures_ensemble"),
+    broker: str = typer.Option("binance"),
+    mode: str = typer.Option("testnet", help="paper | testnet (live is blocked)"),
+    universe: str = typer.Option("crypto_top_20"),
+    interval: str = typer.Option("1d"),
+    starting_cash: float = typer.Option(10_000.0),
+) -> None:
+    """Shadow/paper plan today's futures orders (testnet/paper only; live blocked)."""
+    settings, storage = _bootstrap()
+    if broker != "binance":
+        raise typer.BadParameter("Path B targets Binance futures only.")
+    from app.brokers.binance.futures_testnet_execution import (
+        FuturesExecutionConfig,
+        FuturesTestnetExecutor,
+    )
+
+    prices = _load_futures_prices(storage, universe, interval)
+    _raw, funding_aux = _build_funding_aux(prices.symbols, prices.index, quiet=True)
+    fn = _futures_strategy(strategy)
+    window = prices.close.iloc[-_futures_config(interval, universe).fit_window:]
+    aux = {k: v.iloc[-len(window):] for k, v in prices.aux.items()}
+    if funding_aux is not None:
+        aux["funding"] = funding_aux.iloc[-len(window):]
+    weights = fn(window, aux=aux) if getattr(fn, "wants_aux", False) else fn(window)
+    marks = {s: float(prices.close[s].iloc[-1]) for s in prices.symbols}
+    executor = FuturesTestnetExecutor(FuturesExecutionConfig(mode=mode))
+    report = executor.execute_target({s: float(w) for s, w in weights.items()},
+                                     positions={}, equity=starting_cash, mark_prices=marks)
+    console.print(f"[bold green]{mode.upper()} futures plan[/bold green] — {strategy} on "
+                  f"{universe}. [bold]NO LIVE ORDERS.[/bold] {len(report.fills)} simulated fills.")
+    table = Table(title=f"Simulated futures fills ({mode})")
+    for col in ("symbol", "side", "qty", "price", "fee"):
+        table.add_column(col, justify="right")
+    for f in sorted(report.fills, key=lambda x: -x.quantity * x.price)[:25]:
+        table.add_row(f.symbol, f.side.value, f"{f.quantity:.4f}", f"{f.price:.2f}", f"{f.fee:.2f}")
+    console.print(table)
+    for sym, reason in report.rejected[:10]:
+        console.print(f"[dim]rejected {sym}: {reason}[/dim]")
+
+
+@app.command("futures-readiness")
+def futures_readiness(
+    strategy: str = typer.Option("crypto_futures_ensemble"),
+    universe: str = typer.Option("crypto_top_20"),
+    interval: str = typer.Option("1d"),
+    n_folds: int = typer.Option(3),
+) -> None:
+    """Crypto-futures testnet/paper-readiness gate (Path B). Live stays blocked."""
+    settings, storage = _bootstrap()
+    from app.backtesting.concentration import analyze_concentration
+    from app.backtesting.futures_engine import run_futures_backtest
+
+    prices = _load_futures_prices(storage, universe, interval)
+    raw_funding, funding_aux = _build_funding_aux(prices.symbols, prices.index)
+    aux = dict(prices.aux)
+    if funding_aux is not None:
+        aux["funding"] = funding_aux
+    cfg = _futures_config(interval, universe)
+    res = run_futures_backtest(prices.close, _futures_strategy(strategy), cfg,
+                               funding=raw_funding, aux=aux, open_=prices.open)
+    conc = analyze_concentration(res.equity, close=prices.close, weights_df=res.weights)
+    # simple holdout: split the series, compare first/second half Sharpe
+    eq = res.equity.dropna()
+    half = len(eq) // 2
+    import numpy as np
+
+    def _sh(s):
+        r = s.pct_change().dropna().to_numpy()
+        return float(np.mean(r) / np.std(r) * np.sqrt(365)) if len(r) > 2 and np.std(r) > 0 else 0.0
+    oos_sharpe = _sh(eq.iloc[half:])
+
+    checks = {
+        "positive net return": (res.metrics.get("total_return_pct") or 0) > 0,
+        "Sharpe > 0.5": (res.metrics.get("sharpe") or 0) > 0.5,
+        "2nd-half (OOS) Sharpe > 0": oos_sharpe > 0,
+        "no liquidation breaches at 1x": res.n_liquidation_breaches == 0,
+        "liquidation buffer healthy": res.min_liquidation_distance > 0.3,
+        "concentration: no month > 25%": (conc.max_month_pct or 0) <= 25.0,
+    }
+    console.print(f"Futures readiness — [bold]{strategy}[/bold] ({universe})")
+    table = Table(title="Futures metrics")
+    table.add_column("metric")
+    table.add_column("value", justify="right")
+    for k in ("total_return_pct", "sharpe", "max_drawdown_pct", "ann_vol_pct"):
+        table.add_row(k, str(res.metrics.get(k)))
+    table.add_row("2nd-half OOS sharpe", f"{oos_sharpe:.3f}")
+    table.add_row("funding_paid", f"{res.funding_paid:.2f}")
+    table.add_row("liq_breaches", str(res.n_liquidation_breaches))
+    console.print(table)
+    console.print("\n[bold]Readiness gate[/bold]")
+    for name, ok in checks.items():
+        console.print(f"  [{'green' if ok else 'red'}]{'PASS' if ok else 'FAIL'}[/] {name}")
+    eligible = all(checks.values())
+    n_pass = sum(1 for v in checks.values() if v)
+    verdict = ("[green]TESTNET/PAPER ELIGIBLE[/green]" if eligible
+               else f"[yellow]NOT YET TESTNET/PAPER ELIGIBLE ({n_pass}/{len(checks)})[/yellow]")
+    console.print(f"\nVerdict: {verdict}")
+    console.print("[bold red]LIVE BLOCKED[/bold red] — Binance futures mainnet trading is "
+                  "refused; testnet/paper only, and a supervised period must pass first.")
+    out = settings.reports_dir / f"futures_readiness_{strategy}_{universe}.md"
+    lines = [f"# Futures readiness — {strategy} ({universe}, {interval})", "",
+             f"Verdict: **{'TESTNET/PAPER ELIGIBLE' if eligible else 'NOT YET ELIGIBLE'}** "
+             f"({n_pass}/{len(checks)}). **LIVE BLOCKED.**", "", "## Gates", ""]
+    lines += [f"- {'PASS' if ok else 'FAIL'} — {n}" for n, ok in checks.items()]
+    out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    console.print(f"[green]Report:[/green] {out}")
+
+
 registry_app = typer.Typer(no_args_is_help=True, help="Alpha registry: list, promote, reject, retire.")
 app.add_typer(registry_app, name="alpha-registry")
 

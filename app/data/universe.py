@@ -28,6 +28,15 @@ UNIVERSES: dict[str, list[str]] = {
         "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOGEUSDT", "LTCUSDT",
     ],
     "crypto_majors": ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"],
+    # 20 liquid USDT perps for the crypto-futures research path (Path B). All
+    # have deep perp markets and funding history; still survivor-selected (these
+    # are today's liquid perps, not 2021's).
+    "crypto_top_20": [
+        "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT",
+        "AVAXUSDT", "LINKUSDT", "DOGEUSDT", "LTCUSDT", "DOTUSDT", "MATICUSDT",
+        "TRXUSDT", "BCHUSDT", "ATOMUSDT", "UNIUSDT", "ETCUSDT", "FILUSDT",
+        "APTUSDT", "NEARUSDT",
+    ],
     # Synthetic universe for offline demos/tests: pairs (SYN0,SYN1), (SYN2,SYN3)...
     # are cointegrated by construction.
     "synthetic_demo": [f"SYN{i}" for i in range(8)],
@@ -86,6 +95,8 @@ UNIVERSE_META: dict[str, UniverseMeta] = {
         "today's top-10 by cap/liquidity; coins that died out of the top 10 are absent"),
     "crypto_majors": UniverseMeta("crypto_spot", "static_survivor",
                                   "hand-picked current majors"),
+    "crypto_top_20": UniverseMeta("crypto_futures", "static_survivor",
+                                  "today's 20 liquid USDT perps; survivor-selected"),
     "synthetic_demo": UniverseMeta("synthetic", "not_applicable", "generated data"),
     "us_stocks_demo": UniverseMeta("equity", "static_survivor",
                                    "hand-picked classic pairs, chosen today"),
