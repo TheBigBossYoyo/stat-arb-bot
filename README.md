@@ -406,9 +406,45 @@ docker compose up dashboard                 # dashboard on :8000
 | **Trading 212 CFDs** | ❌ **unsupported by official API — will not be built** |
 | Binance futures / leverage / true shorting | ❌ off by default; spot cannot short |
 
+## Why this is still not guaranteed to be profitable
+
+A deliberately brutal list. None of the engineering below changes the verdict
+in [`FINAL_RESEARCH_REPORT.md`](FINAL_RESEARCH_REPORT.md): **do not trade real
+capital yet.**
+
+- **Single-window, in-sample selection.** The flagship was chosen as the best
+  of ~40-60 configurations on ONE 5-year window. The experiment tracker now
+  counts trials, but the historical trials are not back-filled, so the deflated
+  Sharpe does not yet correct for that search. The true out-of-sample edge is
+  most likely **below the reported Sharpe ~1.0**.
+- **Survivorship bias.** `us_stocks_50/100` are 2026 survivors backtested into
+  2021 — the worst case for momentum. No point-in-time universe yet.
+- **Costs are real and only partly modeled.** We now charge commission,
+  slippage, next-open execution, borrow and margin interest. Still missing:
+  per-name hard-to-borrow rates (your short decile is the expensive one), short
+  dividend liability beyond adjustment, FX, taxes/stamp duty.
+- **Broker limitations are binding.** The strategy is market-neutral; no
+  connected venue can short (T212 Invest/ISA can't, Binance spot can't, futures
+  isn't connected). What you can actually trade is a *different*, long-only,
+  directional strategy that has not been validated.
+- **Regime shift.** Momentum crashes in panic rebounds (2009-style). The 2021-26
+  window has no such event; the crash-protection scaler is unproven on a real one.
+- **Return concentration.** One month is 30% of the flagship's PnL; the best 5%
+  of days exceed its total return. Event-concentrated edges are fragile.
+- **Model decay, capacity, psychology, API outages, slippage drift** — all the
+  usual ways a paper edge dies in production, none yet observed live.
+
+Detail: [`docs/known_limitations.md`](docs/known_limitations.md),
+[`RESEARCH_WEAKNESSES.md`](RESEARCH_WEAKNESSES.md),
+[`PRODUCTION_RISK_REGISTER.md`](PRODUCTION_RISK_REGISTER.md).
+
 ### Honest results disclosure
 
 Full research notes with sources: [`docs/strategy_research.md`](docs/strategy_research.md).
+**Re-validated numbers** (after the audit fixes) are in
+[`docs/current_best_strategy.md`](docs/current_best_strategy.md) — the legacy
+figures below predate the dividend/execution/financing corrections and overstate
+performance by roughly Sharpe 0.3.
 
 **Crypto (10 names, 15m bars, ~90 days, 15 bps costs):** mean reversion bled
 while momentum dominated the window. TSMOM was the only standalone winner

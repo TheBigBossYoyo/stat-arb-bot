@@ -38,6 +38,32 @@ def test_status_read_only_by_default(tmp_path):
     }
 
 
+def test_institutional_read_endpoints(tmp_path):
+    """The new research surface (registry, experiments, data-audit, governance)
+    is exposed read-only and reflects the seeded registry."""
+    client, _, storage = make_client(tmp_path)
+
+    alphas = client.get("/api/alphas")
+    assert alphas.status_code == 200
+    ids = {a["id"] for a in alphas.json()}
+    assert "flagship_daily_ensemble" in ids
+    flagship = next(a for a in alphas.json() if a["id"] == "flagship_daily_ensemble")
+    assert flagship["executable_venues"] == []      # no shorting venue
+    assert flagship["requires_short"] is True
+
+    rejected = client.get("/api/alphas", params={"status": "rejected"})
+    assert {a["id"] for a in rejected.json()} >= {"pca_stat_arb", "xsec_reversion"}
+
+    exps = client.get("/api/experiments")
+    assert exps.status_code == 200                  # empty list is fine on a fresh db
+
+    gov = client.get("/api/governance/flagship_daily_ensemble", params={"to": "live_tiny"})
+    assert gov.status_code == 200
+    body = gov.json()
+    assert body["approved"] is False                # venue gate blocks it
+    assert any(g["name"] == "venue_gate" for g in body["gates"])
+
+
 def test_controls_disabled_blocks_dangerous_posts(tmp_path):
     client, _, storage = make_client(tmp_path, controls=False)
     response = client.post("/api/risk/kill-switch/activate",

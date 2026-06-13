@@ -147,6 +147,79 @@ def create_app(settings: Settings | None = None, storage: Storage | None = None,
     def settings_view():
         return service.settings_view()
 
+    # ---- institutional research surface (read-only) --------------------------------
+
+    @app.get("/api/alphas", dependencies=dep)
+    def alphas(status: str | None = None):
+        """Alpha registry: status, venues, hypothesis, last transition."""
+        from app.research.alpha_registry import AlphaRegistry
+
+        return [
+            {"id": a.alpha_id, "name": a.name, "status": a.status,
+             "asset_class": a.asset_class, "universe": a.universe,
+             "requires_short": a.requires_short, "requires_leverage": a.requires_leverage,
+             "executable_venues": a.executable_venues, "hypothesis": a.hypothesis,
+             "known_risks": a.known_risks,
+             "last_transition": a.history[-1] if a.history else None}
+            for a in AlphaRegistry().list(status=status)
+        ]
+
+    @app.get("/api/experiments", dependencies=dep)
+    def experiments(family: str | None = None, limit: int = 100):
+        """Experiment tracker: every research run with its trial family count."""
+        import json as _json
+
+        rows = storage.list_experiments(family=family, limit=limit)
+        out = []
+        for r in rows:
+            metrics = _json.loads(r.metrics_json or "{}")
+            out.append({
+                "experiment_id": r.experiment_id, "created_at": str(r.created_at),
+                "kind": r.kind, "strategy": r.strategy, "family": r.family,
+                "sample": r.sample, "git_commit": r.git_commit, "git_dirty": r.git_dirty,
+                "sharpe": metrics.get("sharpe", metrics.get("oos_sharpe_mean")),
+                "total_return_pct": metrics.get("total_return_pct",
+                                                metrics.get("oos_total_return_pct")),
+                "family_trials": storage.count_experiment_trials(r.family) if r.family else 0,
+            })
+        return out
+
+    @app.get("/api/data-audit/{universe}", dependencies=dep)
+    def data_audit_view(universe: str, interval: str = "1d", source: str | None = None):
+        """Data-quality verdict for a universe (survivorship/adjustment/coverage)."""
+        from app.data.data_audit import audit_universe
+
+        rep = audit_universe(storage, universe, interval, source=source)
+        return {
+            "universe": rep.universe, "interval": rep.interval,
+            "survivorship": rep.survivorship, "survivorship_note": rep.survivorship_note,
+            "verdict": rep.verdict, "verdict_reasons": rep.verdict_reasons,
+            "adj_coverage_pct": rep.adj_coverage_pct,
+            "alignment_loss_pct": rep.alignment_loss_pct,
+            "missing_symbols": rep.missing_symbols,
+            "symbols_with_issues": [
+                {"symbol": s.symbol, "issues": s.issues} for s in rep.symbols if s.issues],
+        }
+
+    @app.get("/api/governance/{alpha_id}", dependencies=dep)
+    def governance_view(alpha_id: str, to: str = "walk_forward"):
+        """Promotion-gate report for an alpha entering stage `to`."""
+        from app.governance.gates import evaluate_gates
+        from app.research.alpha_registry import AlphaRegistry, RegistryError
+
+        try:
+            alpha = AlphaRegistry().get(alpha_id)
+        except RegistryError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        evidence = {"executable_venues": alpha.executable_venues,
+                    "requires_short": alpha.requires_short,
+                    "requires_leverage": alpha.requires_leverage}
+        report = evaluate_gates(to, evidence, stage_from=alpha.status)
+        return {"alpha_id": alpha_id, "stage_from": alpha.status, "stage_to": to,
+                "approved": report.approved,
+                "gates": [{"name": r.name, "status": r.status, "detail": r.detail,
+                           "blocking": r.blocking} for r in report.results]}
+
     @app.get("/api/jobs", dependencies=dep)
     def jobs():
         return service.list_jobs()
