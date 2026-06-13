@@ -2163,6 +2163,51 @@ def multiple_testing_report(
     console.print(f"[green]Report:[/green] {out}")
 
 
+@app.command("product-decision")
+def product_decision() -> None:
+    """Decide what (if anything) to trade across all paths (Phase 6).
+
+    Synthesizes the readiness of the market-neutral flagship, the long-only
+    equity book and the crypto-futures book into one operator decision: lead
+    product, tradability, missing gates, next action, risk level and capital
+    stage. Reads the readiness reports; run those first for a current verdict."""
+    settings, storage = _bootstrap()
+    from app.research.product_decision import evaluate_products
+
+    decision = evaluate_products(settings, storage)
+    table = Table(title="Product paths")
+    for col in ("product", "venue", "short?", "lev?", "venue wired", "gates", "status", "risk"):
+        table.add_column(col)
+    for p in decision.products:
+        gates = f"{p.gates_passed}/{p.gates_total}" if p.gates_total else "—"
+        scolor = {"do_not_trade": "red", "not_yet": "yellow",
+                  "paper_candidate": "green", "testnet_candidate": "green"}.get(p.status, "dim")
+        table.add_row(p.product_id, p.venue[:38], "yes" if p.requires_short else "no",
+                      "yes" if p.requires_leverage else "no",
+                      "[green]yes[/green]" if p.venue_connected else "[red]no[/red]",
+                      gates, f"[{scolor}]{p.status}[/{scolor}]", p.risk_level)
+    console.print(table)
+    console.print(f"\n[bold]Decision[/bold]: {decision.headline}")
+    console.print(f"[bold]Recommended path[/bold]: {decision.recommended}")
+    console.print(f"[bold]Next action[/bold]: {decision.action}")
+    console.print(f"[bold]Capital stage[/bold]: {decision.capital_stage}")
+    console.print("[bold red]NOTHING IS LIVE ELIGIBLE.[/bold red]")
+    out = settings.reports_dir / "product_decision.md"
+    lines = ["# Product decision", "", f"**{decision.headline}**", "",
+             f"- recommended path: {decision.recommended}",
+             f"- next action: {decision.action}",
+             f"- capital stage: {decision.capital_stage}",
+             "- **NOTHING IS LIVE ELIGIBLE.**", "", "## Paths", ""]
+    for p in decision.products:
+        lines += [f"### {p.product_id} — {p.status}",
+                  f"- {p.name}", f"- venue: {p.venue} (wired: {p.venue_connected})",
+                  f"- gates: {p.gates_passed}/{p.gates_total}; risk: {p.risk_level}",
+                  f"- missing: {', '.join(p.missing) or 'none'}",
+                  *[f"- note: {n}" for n in p.notes], ""]
+    out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    console.print(f"[green]Report:[/green] {out}")
+
+
 # --------------------------------------------------------------------------------
 # Path B — Binance USDT-perp crypto futures (research / paper / testnet only)
 # --------------------------------------------------------------------------------

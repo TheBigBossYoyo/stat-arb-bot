@@ -20,6 +20,23 @@ environment.
 > (`statarb alpha-registry list`). Re-validated numbers will replace the
 > legacy figures as the new pipeline processes them.
 
+> **⚠️ Tradable-product update (2026-06-13).** A follow-on engagement built the
+> path from research candidate to tradable product — see
+> [`TRADABLE_PRODUCT_REPORT.md`](TRADABLE_PRODUCT_REPORT.md) and run
+> `statarb product-decision`. Headlines:
+> - The **market-neutral flagship is NOT tradable** (no shorting venue) and,
+>   corrected for the real ~45-config search, **FAILS its deflated Sharpe**
+>   (P(true>noise-max)=0.375) — an unproven candidate, not an edge.
+> - A new **long-only Trading 212 book** beats SPY/QQQ risk-adjusted (Sharpe
+>   1.53, +23%/yr alpha) and is the **lead paper candidate** (6/7 gates; NOT
+>   market-neutral).
+> - A new **crypto-futures** path (Binance testnet, live blocked) is promising
+>   but extreme-risk and short-sampled (5/6 gates).
+> - **Nothing is live-eligible; nothing is yet paper/testnet-eligible.** See
+>   [`docs/tradability_matrix.md`](docs/tradability_matrix.md),
+>   [`docs/live_readiness.md`](docs/live_readiness.md),
+>   [`docs/no_live_trading_reason.md`](docs/no_live_trading_reason.md).
+
 ---
 
 ## What is statistical arbitrage?

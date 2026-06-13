@@ -7,6 +7,18 @@ The current best *research* strategy is the daily equity ensemble
 inverse-vol allocated with a trailing-t-stat gate. It is **not** live-eligible
 and is **not** market-neutral-tradable on any connected venue.
 
+> **⚠️ Update (2026-06-13, tradable-product engagement).** This market-neutral
+> book is now a **research candidate only** for two reasons: (1) no connected
+> venue can short it, and (2) deflated against the **true ~45-config trial
+> search** (Phase 2 backfill), its Sharpe sits *below* the expected maximum of
+> 45 noise strategies — **P(true Sharpe > noise-max) = 0.375, so it FAILS the
+> deflated-Sharpe gate**. Treat it as unproven, not as an edge. The **tradable
+> lead candidate is now the long-only Trading 212 book**
+> ([`long_only_trading212_strategy.md`](long_only_trading212_strategy.md)),
+> which beats SPY/QQQ risk-adjusted with positive alpha. See
+> [`../TRADABLE_PRODUCT_REPORT.md`](../TRADABLE_PRODUCT_REPORT.md) and
+> `statarb product-decision`.
+
 ## The numbers that matter (net of modeled costs)
 
 All figures: daily bars, 2021-06 → 2026-06, **total-return (dividend-adjusted)
