@@ -1,0 +1,94 @@
+# Historical research-trial manifest (Phase 2 — true deflated Sharpe).
+#
+# The experiment tracker only counts runs made AFTER it was added, so the
+# deflated Sharpe sees ~1 trial while the research program actually evaluated
+# ~50 configurations to select the flagship (audit W-02; FINAL_RESEARCH_REPORT
+# blocker #8). This manifest back-fills those historical trials from the
+# documented record so the deflation corrects for the REAL search.
+#
+# Every entry cites its source in docs/. Sharpes are the annualized figures the
+# docs report; `sharpe: null` marks a return-only trial (still COUNTED toward
+# the trial total, just not used for the Sharpe-dispersion estimate). Numbers
+# pre-date the 2026-06-13 audit re-statement (the flagship's restated full-window
+# Sharpe is ~1.02) — that is fine: these are the *trials that were searched*, and
+# their dispersion is what inflates the winner.
+#
+# `group` is the selection family: the set of configs evaluated for the SAME
+# decision. The flagship is deflated against its whole group, not its exact-config
+# family of one.
+
+groups:
+  equity_daily_book_selection:
+    description: >-
+      Every config evaluated to choose the daily US-equity book (sleeve choice,
+      allocator, ML variants, robustness) on us_stocks_50/100, 1d, 5 bps.
+    universe: us_stocks_50
+    interval: 1d
+  crypto_15m_search:
+    description: Crypto 15m sweeps (different cost regime; separate decision).
+    universe: crypto_top_10
+    interval: 15m
+
+trials:
+  # --- standalone equity sleeves (us_stocks_50, 1d) — strategy_research.md §5,7 ---
+  - {id: eq_pca_standalone, group: equity_daily_book_selection, strategy: pca_stat_arb, sharpe: 0.27, return_pct: 7.7, source: "strategy_research.md §5"}
+  - {id: eq_tsmom_standalone, group: equity_daily_book_selection, strategy: tsmom, sharpe: 0.88, return_pct: 28.8, source: "strategy_research.md §5"}
+  - {id: eq_xsmom_standalone, group: equity_daily_book_selection, strategy: xsec_momentum, sharpe: 1.11, return_pct: 92.9, source: "strategy_research.md §5"}
+  - {id: eq_ml_legacy, group: equity_daily_book_selection, strategy: ml_alpha, sharpe: 0.84, return_pct: 28.5, source: "strategy_research.md §7b (variant A)"}
+  - {id: eq_ml_orthogonal, group: equity_daily_book_selection, strategy: ml_alpha, sharpe: 0.05, return_pct: 0.2, source: "strategy_research.md §7b (variant B)"}
+  - {id: eq_ml_momneutral, group: equity_daily_book_selection, strategy: ml_alpha, sharpe: 0.89, return_pct: 26.7, source: "strategy_research.md §7b (variant C)"}
+  - {id: eq_ml_both, group: equity_daily_book_selection, strategy: ml_alpha, sharpe: 0.30, return_pct: 7.8, source: "strategy_research.md §7b (variant D)"}
+  - {id: eq_pca_flat, group: equity_daily_book_selection, strategy: pca_stat_arb, sharpe: -0.18, return_pct: -6.8, source: "strategy_research.md §5"}
+  # --- sector_stat_arb variants (return-only) — strategy_research.md §5 ---
+  - {id: eq_sector_default, group: equity_daily_book_selection, strategy: sector_stat_arb, sharpe: -0.41, return_pct: -13.8, source: "strategy_research.md §5"}
+  - {id: eq_sector_hl10, group: equity_daily_book_selection, strategy: sector_stat_arb, sharpe: null, return_pct: -24.7, source: "strategy_research.md §5"}
+  - {id: eq_sector_sentry15, group: equity_daily_book_selection, strategy: sector_stat_arb, sharpe: null, return_pct: -13.8, source: "strategy_research.md §5"}
+  - {id: eq_sector_topk5, group: equity_daily_book_selection, strategy: sector_stat_arb, sharpe: null, return_pct: -20.7, source: "strategy_research.md §5"}
+  # --- ensemble combinations (us_stocks_50, 1d) — §5,7c,7d ---
+  - {id: eq_ens3_strict, group: equity_daily_book_selection, strategy: ensemble_pca_tsmom_xsec_momentum, sharpe: 1.05, return_pct: 36.3, source: "strategy_research.md §5,7c"}
+  - {id: eq_ens3_loose, group: equity_daily_book_selection, strategy: ensemble_pca_tsmom_xsec_momentum, sharpe: 1.24, return_pct: 41.1, source: "strategy_research.md §5 (looser gate)"}
+  - {id: eq_ens4_ml_legacy, group: equity_daily_book_selection, strategy: ensemble_ml_pca_tsmom_xsec_momentum, sharpe: 0.95, return_pct: 28.4, source: "strategy_research.md §7c"}
+  - {id: eq_ens4_ml_neutral, group: equity_daily_book_selection, strategy: ensemble_ml_pca_tsmom_xsec_momentum, sharpe: 1.32, return_pct: 40.7, source: "strategy_research.md §7c"}
+  - {id: eq_flagship_3sleeve, group: equity_daily_book_selection, strategy: ensemble_ml_alpha_tsmom_xsec_momentum, sharpe: 1.34, return_pct: 48.5, source: "strategy_research.md §7d (flagship, pre-audit)"}
+  - {id: eq_ml_sub_momentum, group: equity_daily_book_selection, strategy: ensemble_ml_tsmom, sharpe: 0.40, return_pct: null, source: "strategy_research.md §7 (ml substituted)"}
+  - {id: eq_ens5_sector, group: equity_daily_book_selection, strategy: ensemble_5sleeve_sector, sharpe: 1.17, return_pct: null, source: "strategy_research.md §5 (sector as 5th)"}
+  - {id: eq_flagship_swap_sector, group: equity_daily_book_selection, strategy: ensemble_sector_swap, sharpe: 1.13, return_pct: null, source: "strategy_research.md §5"}
+  # --- allocator sweep (validation window) — rejected_strategies.md ---
+  - {id: eq_alloc_inverse_vol, group: equity_daily_book_selection, strategy: ensemble_alloc, sharpe: 1.02, return_pct: null, source: "rejected_strategies.md (allocators)"}
+  - {id: eq_alloc_erc, group: equity_daily_book_selection, strategy: ensemble_alloc, sharpe: 0.986, return_pct: null, source: "rejected_strategies.md (allocators)"}
+  - {id: eq_alloc_hrp, group: equity_daily_book_selection, strategy: ensemble_alloc, sharpe: 0.921, return_pct: null, source: "rejected_strategies.md (allocators)"}
+  # --- t_stat_scale taper sweep — §7c ---
+  - {id: eq_taper3_a, group: equity_daily_book_selection, strategy: ensemble_taper3, sharpe: 0.94, return_pct: null, source: "strategy_research.md §7c"}
+  - {id: eq_taper3_b, group: equity_daily_book_selection, strategy: ensemble_taper3, sharpe: 0.95, return_pct: null, source: "strategy_research.md §7c"}
+  - {id: eq_taper4_a, group: equity_daily_book_selection, strategy: ensemble_taper4, sharpe: 1.06, return_pct: null, source: "strategy_research.md §7c"}
+  - {id: eq_taper4_b, group: equity_daily_book_selection, strategy: ensemble_taper4, sharpe: 1.17, return_pct: null, source: "strategy_research.md §7c"}
+  # --- vol_window robustness — §7c,7d ---
+  - {id: eq_flagship_vw40, group: equity_daily_book_selection, strategy: ensemble_ml_alpha_tsmom_xsec_momentum, sharpe: 1.14, return_pct: null, source: "strategy_research.md §7d"}
+  - {id: eq_flagship_vw80, group: equity_daily_book_selection, strategy: ensemble_ml_alpha_tsmom_xsec_momentum, sharpe: 1.43, return_pct: null, source: "strategy_research.md §7d"}
+  - {id: eq_ens4_vw40, group: equity_daily_book_selection, strategy: ensemble_ml_pca_tsmom_xsec_momentum, sharpe: 1.13, return_pct: null, source: "strategy_research.md §7c"}
+  - {id: eq_ens4_vw80, group: equity_daily_book_selection, strategy: ensemble_ml_pca_tsmom_xsec_momentum, sharpe: 1.38, return_pct: null, source: "strategy_research.md §7c"}
+  # --- tree-seed robustness (flagship, seeds 1/7/42) — §7c ---
+  - {id: eq_flagship_seed1, group: equity_daily_book_selection, strategy: ensemble_ml_alpha_tsmom_xsec_momentum, sharpe: 1.32, return_pct: null, source: "strategy_research.md §7c (seed 1)"}
+  - {id: eq_flagship_seed7, group: equity_daily_book_selection, strategy: ensemble_ml_alpha_tsmom_xsec_momentum, sharpe: 1.32, return_pct: null, source: "strategy_research.md §7c (seed 7)"}
+  - {id: eq_flagship_seed42, group: equity_daily_book_selection, strategy: ensemble_ml_alpha_tsmom_xsec_momentum, sharpe: 1.32, return_pct: null, source: "strategy_research.md §7c (seed 42)"}
+  # --- us_stocks_100 breadth experiments — §5 "100-name" ---
+  - {id: eq100_xsmom_decile, group: equity_daily_book_selection, strategy: xsec_momentum, universe: us_stocks_100, sharpe: 0.81, return_pct: null, source: "strategy_research.md §5 (100-name)"}
+  - {id: eq100_pca_8, group: equity_daily_book_selection, strategy: pca_stat_arb, universe: us_stocks_100, sharpe: null, return_pct: -20.0, source: "strategy_research.md §5 (100-name, 8/side)"}
+  - {id: eq100_pca_16, group: equity_daily_book_selection, strategy: pca_stat_arb, universe: us_stocks_100, sharpe: null, return_pct: -24.0, source: "strategy_research.md §5 (100-name, 16/side)"}
+  - {id: eq100_pca_32, group: equity_daily_book_selection, strategy: pca_stat_arb, universe: us_stocks_100, sharpe: null, return_pct: -29.0, source: "strategy_research.md §5 (100-name, 32/side)"}
+  - {id: eq100_pca_8_var, group: equity_daily_book_selection, strategy: pca_stat_arb, universe: us_stocks_100, sharpe: null, return_pct: -22.0, source: "strategy_research.md §5 (100-name, var_threshold)"}
+  - {id: eq100_pca_16_var, group: equity_daily_book_selection, strategy: pca_stat_arb, universe: us_stocks_100, sharpe: null, return_pct: -26.0, source: "strategy_research.md §5 (100-name, var_threshold)"}
+  - {id: eq100_pca_32_var, group: equity_daily_book_selection, strategy: pca_stat_arb, universe: us_stocks_100, sharpe: null, return_pct: -28.0, source: "strategy_research.md §5 (100-name, var_threshold)"}
+  - {id: eq100_ens_t05, group: equity_daily_book_selection, strategy: ensemble_100, universe: us_stocks_100, sharpe: null, return_pct: -2.0, source: "strategy_research.md §5 (min_sleeve_t -0.5)"}
+  - {id: eq100_ens_t00, group: equity_daily_book_selection, strategy: ensemble_100, universe: us_stocks_100, sharpe: null, return_pct: 14.8, source: "strategy_research.md §5 (min_sleeve_t 0.0)"}
+  - {id: eq_ml_fitwin600, group: equity_daily_book_selection, strategy: ml_alpha, sharpe: 0.52, return_pct: null, source: "strategy_research.md §7b (fit_window 600 legacy)"}
+  - {id: eq_ml_fitwin600_orth, group: equity_daily_book_selection, strategy: ml_alpha, sharpe: 0.33, return_pct: null, source: "strategy_research.md §7b (fit_window 600 orthogonal)"}
+
+  # --- crypto 15m sweeps (separate cost regime) — §4 ---
+  - {id: cr_pca, group: crypto_15m_search, strategy: pca_stat_arb, sharpe: null, return_pct: -15.9, source: "strategy_research.md §4"}
+  - {id: cr_tsmom, group: crypto_15m_search, strategy: tsmom, sharpe: null, return_pct: 7.1, source: "strategy_research.md §4"}
+  - {id: cr_xsmom, group: crypto_15m_search, strategy: xsec_momentum, sharpe: null, return_pct: -3.4, source: "strategy_research.md §4"}
+  - {id: cr_ens, group: crypto_15m_search, strategy: ensemble, sharpe: null, return_pct: 1.7, source: "strategy_research.md §4"}
+  # xsec_reversion: 24 sweep configs, all negative (rejected_strategies.md). Recorded
+  # as 24 counted trials; the doc reports the family lost, not per-config Sharpes.
+  - {id: cr_xsecrev_sweep, group: crypto_15m_search, strategy: xsec_reversion, sharpe: null, return_pct: null, count: 24, source: "rejected_strategies.md (24 sweep configs)"}

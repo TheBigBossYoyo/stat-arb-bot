@@ -1990,6 +1990,179 @@ def experiments(
                   "by the family's trial count (W-02).[/dim]")
 
 
+@app.command("trial-backfill")
+def trial_backfill_cmd(
+    manifest: str | None = typer.Option(None, help="override research_trials.yaml path"),
+) -> None:
+    """Back-fill the documented historical research trials into the registry.
+
+    The deflated Sharpe needs the REAL number of configs searched (~50), not the
+    ~1 the tracker saw before it existed. This imports every cited trial from
+    app/config/research_trials.yaml. Idempotent — safe to re-run."""
+    _, storage = _bootstrap()
+    from pathlib import Path
+
+    from app.research.trial_backfill import backfill_trials
+
+    res = backfill_trials(storage, Path(manifest) if manifest else None)
+    console.print(f"[green]Trial backfill[/green]: inserted {res['inserted']}, "
+                  f"skipped {res['skipped']} (already present), "
+                  f"manifest total {res['total_manifest_trials']}")
+    table = Table(title="Trials per selection group")
+    table.add_column("group")
+    table.add_column("manifest trials", justify="right")
+    for group, n in res["by_group"].items():
+        table.add_row(group, str(n))
+    console.print(table)
+
+
+@app.command("trial-family-report")
+def trial_family_report() -> None:
+    """Selection groups and trial families with counts + Sharpe distributions."""
+    _, storage = _bootstrap()
+    from app.research.trial_backfill import all_groups, backfill_trials, group_stats
+
+    backfill_trials(storage)            # idempotent: ensure the record is populated
+    groups = all_groups(storage)
+    if not groups:
+        console.print("[yellow]No grouped trials. Run `trial-backfill` first.[/yellow]")
+        return
+    table = Table(title="Selection groups (trial families for deflation)")
+    for col in ("group", "trials", "with Sharpe", "best", "mean", "std"):
+        table.add_column(col, justify="right")
+    for g in groups:
+        s = group_stats(storage, g)
+        table.add_row(g, str(s.n_trials), str(len(s.sharpes)),
+                      f"{s.best_sharpe:.2f}" if s.best_sharpe is not None else "—",
+                      f"{s.mean_sharpe:.2f}" if s.mean_sharpe is not None else "—",
+                      f"{s.std_sharpe:.2f}" if s.std_sharpe is not None else "—")
+    console.print(table)
+    console.print("[dim]The trial count + Sharpe std deflate the best-of-group result "
+                  "(deflated-sharpe-report).[/dim]")
+
+
+@app.command("deflated-sharpe-report")
+def deflated_sharpe_report(
+    sleeves: str | None = typer.Option(None, help="flagship sleeves (default config)"),
+    universe: str = typer.Option("us_stocks_50"),
+    interval: str = typer.Option("1d"),
+    group: str = typer.Option("equity_daily_book_selection",
+                              help="selection group to deflate against"),
+) -> None:
+    """Deflate the flagship's Sharpe against the TRUE trial count (Phase 2).
+
+    Re-runs the flagship book for its realized returns, then computes the
+    deflated Sharpe twice: naive (1 trial, what the tracker saw) and honest (the
+    full selection-group trial count). Reports whether the flagship remains
+    research-eligible — and does not hide it if the verdict worsens."""
+    settings, storage = _bootstrap()
+    from app.backtesting.basket_engine import run_basket_backtest
+    from app.core.math_utils import periods_per_year
+    from app.research.deflated_sharpe import deflated_sharpe_ratio
+    from app.research.trial_backfill import backfill_trials, group_stats
+
+    backfill_trials(storage)
+    stats = group_stats(storage, group)
+    if stats.n_trials == 0:
+        console.print(f"[red]No trials in group {group!r}.[/red]")
+        raise typer.Exit(1)
+
+    prices, factory, config, names = _ensemble_price_setup(
+        storage, sleeves, universe, interval, False, 1.0, None)
+    console.print(f"Re-running flagship [bold]{' + '.join(names)}[/bold] for realized "
+                  f"returns (deflating against group '{group}')...")
+    full = run_basket_backtest(prices.close, factory(), config, aux=prices.aux, open_=prices.open)
+    import numpy as np
+
+    rets = full.equity.dropna().pct_change().dropna().to_numpy()
+    ppy = _bars_per_year(universe, interval) or periods_per_year(interval)
+    std_per_period = (stats.std_sharpe / np.sqrt(ppy)) if stats.std_sharpe else None
+
+    naive = deflated_sharpe_ratio(rets, n_trials=1, periods_per_year=ppy)
+    honest = deflated_sharpe_ratio(rets, n_trials=stats.n_trials,
+                                   periods_per_year=ppy, trial_sharpe_std=std_per_period)
+    console.print(f"\n[bold]Selection group[/bold]: {stats.summary()}")
+    console.print("\n[bold]Deflated Sharpe — naive (1 trial)[/bold]")
+    console.print(f"  {naive.summary()}")
+    console.print(f"\n[bold]Deflated Sharpe — honest ({stats.n_trials} trials)[/bold]")
+    console.print(f"  {honest.summary()}")
+    verdict_c = "green" if honest.passed else "red"
+    console.print(f"\nVerdict (honest): [{verdict_c}]{'RESEARCH-ELIGIBLE' if honest.passed else 'FAILS DEFLATED SHARPE'}[/]")
+    if not honest.passed:
+        console.print("[yellow]After correcting for the real search, P(true Sharpe > "
+                      "E[max of noise]) is below 0.95. This is the honest, harsher "
+                      "verdict the audit demanded — the flagship is a plausible but "
+                      "UNPROVEN candidate, not an established edge.[/yellow]")
+    out = settings.reports_dir / f"deflated_sharpe_{group}.md"
+    out.write_text(
+        f"# Deflated Sharpe — {' + '.join(names)} vs group '{group}'\n\n"
+        f"- {stats.summary()}\n"
+        f"- naive (1 trial): {naive.summary()}\n"
+        f"- honest ({stats.n_trials} trials): {honest.summary()}\n"
+        f"- verdict: {'RESEARCH-ELIGIBLE' if honest.passed else 'FAILS DEFLATED SHARPE'}\n",
+        encoding="utf-8")
+    console.print(f"[green]Report:[/green] {out}")
+
+
+@app.command("multiple-testing-report")
+def multiple_testing_report(
+    group: str = typer.Option("equity_daily_book_selection"),
+    fdr_alpha: float = typer.Option(0.10),
+) -> None:
+    """Family-wise / FDR correction + overfitting warning across a group.
+
+    Converts each trial's annualized Sharpe to an approximate t-stat / p-value
+    (t ≈ Sharpe·√years), then applies Bonferroni and Benjamini-Hochberg, and
+    flags probability-of-backtest-overfitting risk by comparing the best
+    observed Sharpe to E[max] of pure-noise trials."""
+    settings, storage = _bootstrap()
+    import numpy as np
+    from scipy import stats as sps
+
+    from app.research.deflated_sharpe import expected_max_sharpe
+    from app.research.multiple_testing import benjamini_hochberg, bonferroni
+    from app.research.trial_backfill import backfill_trials, group_stats
+
+    backfill_trials(storage)
+    gs = group_stats(storage, group)
+    if not gs.sharpes:
+        console.print(f"[yellow]No recorded Sharpes in group {group!r}.[/yellow]")
+        raise typer.Exit(1)
+    years = 3.8                          # the daily research window length
+    sharpes = np.array(gs.sharpes)
+    tstats = sharpes * np.sqrt(years)
+    pvalues = [float(1.0 - sps.norm.cdf(t)) for t in tstats]   # one-sided H0: SR<=0
+    bonf = bonferroni(pvalues, alpha=0.05)
+    bh = benjamini_hochberg(pvalues, alpha=fdr_alpha)
+    best = float(sharpes.max())
+    emax_ann = expected_max_sharpe(gs.n_trials, gs.std_sharpe / 1.0) if gs.std_sharpe else 0.0
+
+    console.print(f"[bold]Multiple-testing — group '{group}'[/bold] "
+                  f"({gs.n_trials} trials, {len(gs.sharpes)} with Sharpe)")
+    console.print(f"  best Sharpe {best:.2f} | Bonferroni discoveries "
+                  f"{sum(bonf)}/{len(bonf)} | BH(FDR {fdr_alpha}) discoveries {sum(bh)}/{len(bh)}")
+    console.print(f"  E[max Sharpe] of {gs.n_trials} pure-noise trials "
+                  f"(dispersion {gs.std_sharpe:.2f}): {emax_ann:.2f}")
+    pbo_risk = "HIGH" if best <= emax_ann * 1.2 else ("MODERATE" if best <= emax_ann * 1.8 else "LOW")
+    color = {"HIGH": "red", "MODERATE": "yellow", "LOW": "green"}[pbo_risk]
+    console.print(f"  overfitting (PBO) risk: [{color}]{pbo_risk}[/] — best Sharpe is "
+                  f"{best / emax_ann:.1f}x the noise-max" if emax_ann > 0 else
+                  "  overfitting risk: indeterminate (no dispersion)")
+    if sum(bonf) == 0:
+        console.print("[yellow]No trial survives Bonferroni — individually, no single "
+                      "config is significant after family-wise correction.[/yellow]")
+    out = settings.reports_dir / f"multiple_testing_{group}.md"
+    out.write_text(
+        f"# Multiple-testing — group '{group}'\n\n"
+        f"- trials: {gs.n_trials} ({len(gs.sharpes)} with Sharpe)\n"
+        f"- best Sharpe: {best:.2f}\n"
+        f"- Bonferroni discoveries (a=0.05): {sum(bonf)}/{len(bonf)}\n"
+        f"- Benjamini-Hochberg discoveries (FDR {fdr_alpha}): {sum(bh)}/{len(bh)}\n"
+        f"- E[max Sharpe] of noise: {emax_ann:.2f}\n"
+        f"- PBO risk: {pbo_risk}\n", encoding="utf-8")
+    console.print(f"[green]Report:[/green] {out}")
+
+
 registry_app = typer.Typer(no_args_is_help=True, help="Alpha registry: list, promote, reject, retire.")
 app.add_typer(registry_app, name="alpha-registry")
 
