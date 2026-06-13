@@ -482,6 +482,8 @@ def _basket_weight_fn(strategy: str, defaults: dict, long_only: bool,
             top_k=int(momentum_raw.get("xsmom_top_k", 2)),
             top_frac=float(momentum_raw.get("xsmom_top_frac", 0)),
             long_only=long_only,
+            crash_protect_vol_window=int(momentum_raw.get("xsmom_crash_vol_window", 0)),
+            crash_protect_target_vol=float(momentum_raw.get("xsmom_crash_target_vol", 0)),
         ))
     raise typer.BadParameter(f"unknown basket strategy {strategy!r}; choose from {BASKET_STRATEGIES}")
 
@@ -1399,6 +1401,71 @@ def registry_retire(
     except RegistryError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
+
+
+@app.command("governance-report")
+def governance_report(
+    alpha_id: str = typer.Argument(...),
+    to: str = typer.Option(..., "--to", help="the stage you want to promote into"),
+) -> None:
+    """Show the promotion-gate report for an alpha entering `to`.
+
+    Evidence is read from the alpha's latest validate-ensemble report and data
+    audit where available; missing evidence fails the gate that needs it (that
+    is the point — unproven claims do not pass). This NEVER promotes; use
+    `alpha-registry promote` (structural) once gates are green."""
+    settings, storage = _bootstrap()
+    from app.governance.gates import evaluate_gates
+    from app.research.alpha_registry import AlphaRegistry, RegistryError
+
+    try:
+        alpha = AlphaRegistry().get(alpha_id)
+    except RegistryError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    evidence = _collect_governance_evidence(settings, storage, alpha)
+    report = evaluate_gates(to, evidence, stage_from=alpha.status)
+    console.print(f"[bold]Governance gates: {alpha_id} ({alpha.status} -> {to})[/bold]")
+    for r in report.results:
+        color = "green" if r.passed else ("red" if r.blocking else "yellow")
+        console.print(f"  [{color}]{r.status}[/{color}] {r.name}: {r.detail}")
+    verdict = "[green]APPROVED[/green]" if report.approved else "[red]BLOCKED[/red]"
+    console.print(f"verdict: {verdict}")
+    if not report.approved:
+        console.print("[dim]Unproven gates fail by design — run validate-ensemble / "
+                      "data-audit to generate the missing evidence.[/dim]")
+
+
+def _collect_governance_evidence(settings, storage, alpha) -> dict:
+    """Best-effort evidence assembly from recorded artifacts. Conservative:
+    anything not found stays absent and its gate fails."""
+    import re
+
+    evidence: dict = {
+        "executable_venues": alpha.executable_venues,
+        "requires_short": alpha.requires_short,
+        "requires_leverage": alpha.requires_leverage,
+    }
+    # data verdict from the latest data audit report for the alpha's universe
+    audit_md = settings.reports_dir / f"data_audit_{alpha.universe}_1d.md"
+    if audit_md.exists():
+        text = audit_md.read_text(encoding="utf-8")
+        m = re.search(r"verdict:\s*\*?\*?(\w+)", text, re.IGNORECASE)
+        if m:
+            evidence["data_verdict"] = m.group(1).lower()
+    # validation summary, if a validate-ensemble report exists
+    val_md = settings.reports_dir / f"validate_ensemble_{alpha.universe}_1d.md"
+    if val_md.exists():
+        text = val_md.read_text(encoding="utf-8")
+        for key, pat in (("oos_sharpe", r"oos_sharpe_mean:\s*([-\d.]+)"),
+                         ("oos_sharpe_degradation", r"sharpe_degradation:\s*([-\d.]+)"),
+                         ("max_month_pct", r"max_month_pct:\s*([-\d.]+)")):
+            m = re.search(pat, text)
+            if m:
+                evidence[key] = float(m.group(1))
+        evidence["survives_costs_x2"] = "costs_x2" in text
+    return evidence
 
 
 @app.command("dashboard")

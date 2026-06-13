@@ -45,6 +45,14 @@ class XSMOMConfig(BaseModel):
     top_frac: float = 0.0
     gross_target: float = 1.0
     long_only: bool = False
+    # crash protection (Daniel & Moskowitz 2016, "Momentum Crashes"): momentum
+    # crashes in panic rebounds, exactly when recent market volatility is high
+    # and the market itself has fallen. When `crash_protect` is on, the book is
+    # scaled down by the ratio of a long-run vol target to recent market vol —
+    # this is the dynamic that turns momentum's worst drawdowns from -50%+ into
+    # something survivable. 0 disables.
+    crash_protect_vol_window: int = 0     # bars of recent market vol (0 = off)
+    crash_protect_target_vol: float = 0.0  # per-bar market vol target for full size
 
 
 def _momentum_scores(close_window: pd.DataFrame, lookback: int, skip: int) -> pd.Series | None:
@@ -84,6 +92,18 @@ def make_tsmom_weight_fn(config: TSMOMConfig | None = None) -> WeightFn:
     return weight_fn
 
 
+def _crash_scalar(close_window: pd.DataFrame, cfg: XSMOMConfig) -> float:
+    """<=1.0 multiplier that de-risks momentum when recent equal-weight market
+    volatility exceeds the target (Daniel-Moskowitz crash protection)."""
+    if cfg.crash_protect_vol_window <= 0 or cfg.crash_protect_target_vol <= 0:
+        return 1.0
+    mkt = np.log(close_window).diff().mean(axis=1).iloc[-cfg.crash_protect_vol_window:]
+    vol = float(mkt.std(ddof=1)) if len(mkt) > 1 else 0.0
+    if vol <= 1e-12:
+        return 1.0
+    return float(min(1.0, cfg.crash_protect_target_vol / vol))
+
+
 def make_xsmom_weight_fn(config: XSMOMConfig | None = None) -> WeightFn:
     cfg = config or XSMOMConfig()
 
@@ -96,6 +116,7 @@ def make_xsmom_weight_fn(config: XSMOMConfig | None = None) -> WeightFn:
             top_k = max(2, round(cfg.top_frac * close_window.shape[1]))
         # rank_weights longs the most NEGATIVE scores (mean-reversion
         # convention), so feed it negated momentum: winners become longs.
-        return rank_weights(-momentum, top_k, cfg.gross_target, cfg.long_only)
+        weights = rank_weights(-momentum, top_k, cfg.gross_target, cfg.long_only)
+        return weights * _crash_scalar(close_window, cfg)
 
     return weight_fn

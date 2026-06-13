@@ -33,7 +33,14 @@ class KillSwitch:
     @property
     def is_active(self) -> bool:
         if self.flag_path:
-            return self.flag_path.exists()
+            # FAIL CLOSED (audit PR-03): if we cannot determine the flag state
+            # (unreadable path, NFS hiccup), assume the switch is ENGAGED rather
+            # than letting order flow resume on an I/O error.
+            try:
+                return self.flag_path.exists()
+            except OSError as exc:
+                log.error("kill-switch flag unreadable (%s) — failing CLOSED", exc)
+                return True
         return self._active
 
     @property
