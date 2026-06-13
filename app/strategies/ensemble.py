@@ -72,7 +72,8 @@ class RiskParityEnsemble:
     # accept aux frames from the engine and forward them to sleeves that ask
     wants_aux = True
 
-    def __init__(self, sleeves: dict[str, WeightFn], config: EnsembleConfig | None = None) -> None:
+    def __init__(self, sleeves: dict[str, WeightFn], config: EnsembleConfig | None = None,
+                 record_history: bool = False) -> None:
         if not sleeves:
             raise ValueError("ensemble needs at least one sleeve")
         self.sleeves = sleeves
@@ -86,6 +87,11 @@ class RiskParityEnsemble:
         self._portfolio_returns: deque[float] = deque(maxlen=self.cfg.vol_window)
         self._last_combined: pd.Series | None = None
         self._pending_portfolio_cost = 0.0
+        # per-sleeve contribution-weight history for concentration attribution
+        # (Phase 1). Each entry is (ts, {sleeve: allocation*sleeve_weights}); the
+        # sleeves sum to the portfolio book, so attribution is additive.
+        self.record_history = record_history
+        self.history: list[tuple[pd.Timestamp, dict[str, pd.Series]]] = []
 
     def sleeve_allocations(self) -> dict[str, float]:
         """Current inverse-vol risk shares among sleeves passing the trailing
@@ -182,6 +188,12 @@ class RiskParityEnsemble:
         combined = pd.Series(0.0, index=close_window.columns)
         for name, w in sleeve_weights.items():
             combined = combined.add(allocations[name] * w, fill_value=0.0)
+
+        if self.record_history:
+            self.history.append((
+                close_window.index[-1],
+                {name: (allocations[name] * w).copy() for name, w in sleeve_weights.items()},
+            ))
 
         combined *= self._vol_target_scalar() * self.cfg.leverage
         gross = float(combined.abs().sum())

@@ -554,7 +554,8 @@ def backtest_basket(
 
 def _build_ensemble(sleeves: str | None, defaults: dict, long_only: bool,
                     universe: str, interval: str, leverage: float, reb_every: int,
-                    alloc_mode: str | None = None):
+                    alloc_mode: str | None = None, config_overrides: dict | None = None,
+                    record_history: bool = False):
     """Risk-parity ensemble from strategy_defaults.yaml (shared by the
     ensemble backtest and the basket paper trader)."""
     from app.core.math_utils import periods_per_year
@@ -570,20 +571,24 @@ def _build_ensemble(sleeves: str | None, defaults: dict, long_only: bool,
         if name not in BASKET_STRATEGIES:
             raise typer.BadParameter(f"unknown sleeve {name!r}; choose from {BASKET_STRATEGIES}")
     bpy = _bars_per_year(universe, interval) or periods_per_year(interval)
+    cfg_kwargs = dict(
+        vol_window=int(ens_raw.get("vol_window", 30)),
+        min_observations=int(ens_raw.get("min_observations", 5)),
+        gross_target=float(ens_raw.get("gross_target", 1.0)),
+        leverage=leverage,
+        max_sleeve_share=float(ens_raw.get("max_sleeve_share", 0.60)),
+        min_sleeve_t=float(ens_raw.get("min_sleeve_t", -0.5)),
+        cost_bps=float(basket_raw.get("cost_bps", 15)),
+        target_vol_pct=float(ens_raw.get("target_vol_pct", 0)),
+        rebalances_per_year=bpy / reb_every,
+        alloc_mode=str(ens_raw.get("alloc_mode", "inverse_vol")),
+    )
+    if config_overrides:
+        cfg_kwargs.update(config_overrides)
     ensemble = RiskParityEnsemble(
         {name: _basket_weight_fn(name, defaults, long_only, universe) for name in names},
-        EnsembleConfig(
-            vol_window=int(ens_raw.get("vol_window", 30)),
-            min_observations=int(ens_raw.get("min_observations", 5)),
-            gross_target=float(ens_raw.get("gross_target", 1.0)),
-            leverage=leverage,
-            max_sleeve_share=float(ens_raw.get("max_sleeve_share", 0.60)),
-            min_sleeve_t=float(ens_raw.get("min_sleeve_t", -0.5)),
-            cost_bps=float(basket_raw.get("cost_bps", 15)),
-            target_vol_pct=float(ens_raw.get("target_vol_pct", 0)),
-            rebalances_per_year=bpy / reb_every,
-            alloc_mode=str(ens_raw.get("alloc_mode", "inverse_vol")),
-        ),
+        EnsembleConfig(**cfg_kwargs),
+        record_history=record_history,
     )
     return names, ensemble
 
@@ -868,6 +873,691 @@ def compare_allocators(
                   + (f" (inverse_vol: {iv})" if iv is not None else ""))
     console.print("[dim]In-sample only — confirm OOS with validate-ensemble before "
                   "changing the default (acceptance criteria).[/dim]")
+
+
+def _concentration_setup(storage, sleeves, universe, interval):
+    """Prices + base BasketConfig + rebalance cadence for the concentration
+    commands (mirrors _ensemble_price_setup but exposes the raw pieces)."""
+    from app.backtesting.basket_engine import BasketConfig
+    from app.data.market_data import build_price_matrix
+    from app.data.universe import get_universe
+
+    defaults = _strategy_defaults(interval)
+    basket_raw = defaults.get("basket", {}) or {}
+    bt_raw = defaults.get("backtest", {}) or {}
+    reb_every = int(basket_raw.get("rebalance_every", 24))
+    use_adjusted = _default_adjusted(universe, interval)
+    prices = build_price_matrix(storage, get_universe(universe), interval, adjusted=use_adjusted)
+    _print_adjustment_status(prices, universe, interval)
+    config = BasketConfig(
+        interval=interval, fit_window=int(basket_raw.get("fit_window", 1500)),
+        rebalance_every=reb_every, cost_bps=float(basket_raw.get("cost_bps", 15)),
+        bars_per_year=_bars_per_year(universe, interval), fill="next_open",
+        borrow_bps_annual=float(bt_raw.get("borrow_bps_annual", 0)),
+        margin_bps_annual=float(bt_raw.get("margin_bps_annual", 0)),
+        label="ensemble",
+    )
+    return defaults, prices, config, reb_every
+
+
+def _fix_factory(spec, defaults, sleeves, universe, interval, reb_every, *,
+                 record_history=False):
+    """Return (factory, names) where factory() builds a FRESH ensemble (sleeves
+    are stateful) with `spec`'s config overrides and transforms applied."""
+    from app.backtesting.concentration_fixes import WrappedWeightFn
+    from app.data.universe import get_sectors
+
+    ctx = {"sectors": get_sectors(universe)}
+
+    def factory():
+        names, ens = _build_ensemble(
+            sleeves, defaults, False, universe, interval, 1.0, reb_every,
+            config_overrides=spec.config_overrides, record_history=record_history)
+        transforms = spec.transforms(ctx)
+        return (WrappedWeightFn(ens, transforms) if transforms else ens), names
+
+    fn, names = factory()
+    return (lambda: factory()[0]), names
+
+
+@app.command("concentration-report")
+def concentration_report_cmd(
+    strategy: str = typer.Option("ensemble", help="ensemble (only basket form supported)"),
+    sleeves: str | None = typer.Option(None),
+    universe: str = typer.Option("us_stocks_50"),
+    interval: str = typer.Option("1d"),
+    fix: str = typer.Option("none", help="apply a named concentration fix first"),
+) -> None:
+    """Full return-concentration diagnostics for the ensemble (Phase 1).
+
+    Monthly/daily contribution, the best 5% of days, per-asset / per-sector /
+    per-sleeve attribution, Herfindahl indices, a 0-100 concentration score and
+    the pass/fail gate (no month > 25% of PnL, etc). This is the gate the
+    flagship currently fails."""
+    settings, storage = _bootstrap()
+    from app.backtesting.basket_engine import run_basket_backtest
+    from app.backtesting.concentration import analyze_concentration, attribute_sleeves
+    from app.backtesting.concentration_fixes import WrappedWeightFn, default_fix_specs
+    from app.data.universe import get_sectors
+
+    specs = default_fix_specs(get_sectors(universe))
+    if fix not in specs:
+        raise typer.BadParameter(f"unknown fix {fix!r}; choose from {list(specs)}")
+    defaults, prices, config, reb_every = _concentration_setup(
+        storage, sleeves, universe, interval)
+    factory, names = _fix_factory(specs[fix], defaults, sleeves, universe,
+                                  interval, reb_every, record_history=True)
+    fn = factory()
+    console.print(f"Concentration report: [bold]{' + '.join(names)}[/bold] "
+                  f"(fix={fix}) on {universe}...")
+    result = run_basket_backtest(prices.close, fn, config, aux=prices.aux, open_=prices.open)
+    ensemble = getattr(fn, "inner", fn)
+    sleeve_pnl = attribute_sleeves(getattr(ensemble, "history", []),
+                                   prices.close, result.equity)
+    rep = analyze_concentration(
+        result.equity, close=prices.close, weights_df=result.weights,
+        sectors=get_sectors(universe),
+        sleeve_pnl=sleeve_pnl if not sleeve_pnl.empty else None)
+    _print_concentration(rep)
+    out = settings.reports_dir / f"concentration_{strategy}_{universe}_{interval}_{fix}.md"
+    out.write_text(_concentration_markdown(rep, names, universe, interval, fix),
+                   encoding="utf-8")
+    console.print(f"\n[green]Report:[/green] {out}")
+
+
+def _print_concentration(rep) -> None:
+    gate = rep.gate()
+    console.print(f"\n[bold]Concentration score[/bold]: {rep.concentration_score()}/100 "
+                  f"(lower is better)")
+    flat = rep.to_flat()
+    table = Table(title="Concentration metrics")
+    table.add_column("metric")
+    table.add_column("value", justify="right")
+    for key in ("max_month_pct", "max_day_pct", "best5pct_share", "monthly_herfindahl",
+                "top_asset", "top_asset_pct", "asset_herfindahl", "top_sector",
+                "top_sector_pct", "top_sleeve", "top_sleeve_pct", "max_drawdown_pct"):
+        table.add_row(key, str(flat.get(key)))
+    console.print(table)
+    if rep.monthly_table is not None:
+        worst = rep.monthly_table.sort_values("share_pct", ascending=False).head(5)
+        console.print("\n[bold]Top months by PnL share[/bold]")
+        console.print(worst)
+    if rep.daily_top is not None:
+        console.print("\n[bold]Top days by PnL share[/bold]")
+        console.print(rep.daily_top.head(5).to_string(index=False))
+    console.print("\n[bold]Gate[/bold]")
+    for name, ok in gate.checks.items():
+        console.print(f"  [{'green' if ok else 'red'}]{'PASS' if ok else 'FAIL'}[/] {name}")
+    verdict = "[green]PASS[/green]" if gate.passed else "[red]FAIL[/red]"
+    console.print(f"verdict: {verdict}")
+    for reason in gate.reasons:
+        console.print(f"  [yellow]- {reason}[/yellow]")
+
+
+def _concentration_markdown(rep, names, universe, interval, fix) -> str:
+    gate = rep.gate()
+    lines = [
+        f"# Return concentration — {' + '.join(names)} ({universe}, {interval})",
+        f"\nFix applied: **{fix}**  |  concentration score: "
+        f"**{rep.concentration_score()}/100** (lower is better)",
+        f"\nGate verdict: **{'PASS' if gate.passed else 'FAIL'}**", "",
+        "## Metrics", "",
+        *(f"- {k}: {v}" for k, v in rep.to_flat().items()), "",
+    ]
+    if rep.monthly_table is not None:
+        lines += ["## Monthly PnL contribution", "", rep.monthly_table.to_markdown(), ""]
+    if rep.daily_top is not None:
+        lines += ["## Top days by PnL share", "",
+                  rep.daily_top.to_markdown(index=False), ""]
+    if rep.asset_table is not None:
+        lines += ["## Per-asset PnL contribution (top 15)", "",
+                  rep.asset_table.head(15).to_markdown(), ""]
+    if rep.sector_table is not None:
+        lines += ["## Per-sector PnL contribution", "", rep.sector_table.to_markdown(), ""]
+    if rep.sleeve_table is not None:
+        lines += ["## Per-sleeve PnL contribution", "", rep.sleeve_table.to_markdown(), ""]
+    lines += ["## Gate checks", ""]
+    lines += [f"- {'PASS' if ok else 'FAIL'} — {name}" for name, ok in gate.checks.items()]
+    if gate.reasons:
+        lines += ["", "### Failures"] + [f"- {r}" for r in gate.reasons]
+    return "\n".join(lines) + "\n"
+
+
+@app.command("concentration-fix-backtest")
+def concentration_fix_backtest(
+    fix: str = typer.Option("combo", help="named fix (see compare-concentration-fixes)"),
+    sleeves: str | None = typer.Option(None),
+    universe: str = typer.Option("us_stocks_50"),
+    interval: str = typer.Option("1d"),
+    n_folds: int = typer.Option(3),
+) -> None:
+    """Backtest one concentration fix: full-window concentration + OOS Sharpe.
+
+    A fix is only worth keeping if it lowers concentration WITHOUT breaking the
+    out-of-sample Sharpe — both are reported here side by side with the baseline."""
+    settings, storage = _bootstrap()
+    from app.backtesting.basket_engine import run_basket_backtest
+    from app.backtesting.concentration import analyze_concentration
+    from app.backtesting.concentration_fixes import default_fix_specs
+    from app.backtesting.walk_forward import run_basket_holdout
+    from app.data.universe import get_sectors
+
+    specs = default_fix_specs(get_sectors(universe))
+    if fix not in specs:
+        raise typer.BadParameter(f"unknown fix {fix!r}; choose from {list(specs)}")
+    defaults, prices, config, reb_every = _concentration_setup(
+        storage, sleeves, universe, interval)
+
+    rows = []
+    for spec_name in ("none", fix) if fix != "none" else ("none",):
+        spec = specs[spec_name]
+        factory, names = _fix_factory(spec, defaults, sleeves, universe, interval, reb_every)
+        full = run_basket_backtest(prices.close, factory(), config,
+                                   aux=prices.aux, open_=prices.open)
+        rep = analyze_concentration(full.equity, close=prices.close,
+                                    weights_df=full.weights, sectors=get_sectors(universe))
+        wf = run_basket_holdout(prices.close, factory, config, n_folds=n_folds,
+                                aux=prices.aux, open_=prices.open)
+        rows.append({
+            "fix": spec_name,
+            "return_pct": full.metrics.get("total_return_pct"),
+            "sharpe": full.metrics.get("sharpe"),
+            "max_dd_pct": full.metrics.get("max_drawdown_pct"),
+            "turnover": full.metrics.get("turnover"),
+            "max_month_pct": rep.max_month_pct,
+            "best5pct_share": rep.best5pct_share,
+            "conc_score": rep.concentration_score(),
+            "gate": "PASS" if rep.gate().passed else "FAIL",
+            "oos_sharpe": wf.summary.get("oos_sharpe_mean"),
+        })
+    import pandas as pd
+
+    df = pd.DataFrame(rows).set_index("fix")
+    console.print(f"\nFix backtest — {' + '.join(names)} ({universe})")
+    console.print(df)
+    console.print("[dim]Keep a fix only if conc_score drops and oos_sharpe holds.[/dim]")
+
+
+@app.command("compare-concentration-fixes")
+def compare_concentration_fixes(
+    sleeves: str | None = typer.Option(None),
+    universe: str = typer.Option("us_stocks_50"),
+    interval: str = typer.Option("1d"),
+    n_folds: int = typer.Option(3),
+) -> None:
+    """Run every concentration fix and rank them by (gate pass, OOS Sharpe).
+
+    Picks the best fix that passes the concentration gate while preserving
+    out-of-sample Sharpe — the Phase 1 acceptance test. Writes a report and
+    prints the recommended fix (or 'none survive' if the edge is too concentrated
+    to repair without destroying it)."""
+    settings, storage = _bootstrap()
+    import pandas as pd
+
+    from app.backtesting.basket_engine import run_basket_backtest
+    from app.backtesting.concentration import analyze_concentration
+    from app.backtesting.concentration_fixes import default_fix_specs
+    from app.backtesting.walk_forward import run_basket_holdout
+    from app.data.universe import get_sectors
+
+    specs = default_fix_specs(get_sectors(universe))
+    defaults, prices, config, reb_every = _concentration_setup(
+        storage, sleeves, universe, interval)
+
+    rows = []
+    names: list[str] = []
+    base_oos = None
+    for name, spec in specs.items():
+        factory, names = _fix_factory(spec, defaults, sleeves, universe, interval, reb_every)
+        full = run_basket_backtest(prices.close, factory(), config,
+                                   aux=prices.aux, open_=prices.open)
+        rep = analyze_concentration(full.equity, close=prices.close,
+                                    weights_df=full.weights, sectors=get_sectors(universe))
+        wf = run_basket_holdout(prices.close, factory, config, n_folds=n_folds,
+                                aux=prices.aux, open_=prices.open)
+        oos = wf.summary.get("oos_sharpe_mean")
+        if name == "none":
+            base_oos = oos
+        rows.append({
+            "fix": name, "return_pct": full.metrics.get("total_return_pct"),
+            "sharpe": full.metrics.get("sharpe"),
+            "max_dd_pct": full.metrics.get("max_drawdown_pct"),
+            "max_month_pct": rep.max_month_pct, "best5pct_share": rep.best5pct_share,
+            "conc_score": rep.concentration_score(),
+            "gate_pass": rep.gate().passed, "oos_sharpe": oos,
+        })
+        console.print(f"  [dim]{name}: score {rep.concentration_score()}, "
+                      f"gate {'PASS' if rep.gate().passed else 'FAIL'}, oos {oos}[/dim]")
+
+    df = pd.DataFrame(rows).set_index("fix")
+    console.print(f"\nConcentration-fix comparison — {' + '.join(names)} ({universe})")
+    console.print(df)
+
+    # acceptance: gate passes AND OOS Sharpe within 15% of baseline (no edge destruction)
+    floor = (float(base_oos) * 0.85) if base_oos else 0.0
+    base_score = float(df.loc["none", "conc_score"]) if "none" in df.index else None
+    oos_ok = df["oos_sharpe"].astype(float) >= floor
+    survivors = df[(df["gate_pass"]) & oos_ok]
+    survivors = survivors[survivors.index != "none"]
+    # best MITIGATION: lowers concentration vs baseline without hurting OOS, even
+    # if the absolute gate (e.g. best-5%-days < total return) is structurally
+    # unreachable for a daily strategy. Honest middle ground between PASS and "no fix".
+    mitig = df[oos_ok & (df.index != "none")]
+    if base_score is not None:
+        mitig = mitig[mitig["conc_score"].astype(float) < base_score - 1.0]
+    best_mitig = mitig["conc_score"].astype(float).idxmin() if len(mitig) else None
+
+    recommended = None
+    if len(survivors):
+        recommended = survivors["oos_sharpe"].astype(float).idxmax()
+        console.print(f"\n[green]Recommended fix (passes gate):[/green] [bold]{recommended}[/bold] "
+                      f"(OOS Sharpe {survivors.loc[recommended, 'oos_sharpe']} >= floor {floor:.2f})")
+    elif best_mitig:
+        console.print(f"\n[yellow]No fix fully clears the absolute gate[/yellow] (the "
+                      f"'best-5%-of-days < total return' bar is structurally hard for a "
+                      f"daily strategy). Best MITIGATION: [bold]{best_mitig}[/bold] — "
+                      f"conc score {df.loc[best_mitig, 'conc_score']} vs baseline {base_score}, "
+                      f"OOS Sharpe {df.loc[best_mitig, 'oos_sharpe']} (>= floor {floor:.2f}). "
+                      f"It reduces concentration without hurting out-of-sample return.")
+    else:
+        console.print("\n[red]No fix reduces concentration while preserving OOS Sharpe — "
+                      "the edge is too concentrated to repair. Honest negative result; "
+                      "do not force a fix.[/red]")
+    out = settings.reports_dir / f"concentration_fixes_{universe}_{interval}.md"
+    lines = [f"# Concentration-fix comparison — {' + '.join(names)} ({universe}, {interval})",
+             "", df.to_markdown(), "",
+             f"OOS Sharpe floor (85% of baseline {base_oos}): {floor:.3f}",
+             f"Baseline concentration score: {base_score}", ""]
+    if recommended:
+        lines.append(f"**Recommended fix (passes gate): {recommended}**")
+    elif best_mitig:
+        lines += [f"**No fix clears the absolute gate; best mitigation: {best_mitig}**",
+                  "", "The 'best 5% of days < total return' criterion is structurally hard "
+                  "for a daily directional strategy; the recommended mitigation lowers the "
+                  "concentration score and best-5%-share without reducing OOS Sharpe."]
+    else:
+        lines.append("**No fix survives — edge too concentrated; keep researching.**")
+    out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    console.print(f"[green]Report:[/green] {out}")
+
+
+# --------------------------------------------------------------------------------
+# Path A — long-only Trading 212 Invest/ISA product
+# --------------------------------------------------------------------------------
+
+LONG_ONLY_STRATEGIES = ("long_only_xsec_momentum", "long_only_tsmom",
+                        "long_only_ml_alpha", "long_only_ensemble")
+
+
+def _long_only_configs(defaults: dict):
+    """Map the tuned daily momentum/ML config onto the long-only sleeve configs
+    so Path A inherits the flagship's calibration (252-day momentum, etc.)."""
+    from app.strategies.long_only_momentum import LongOnlyTSMOMConfig, LongOnlyXSMOMConfig
+    from app.strategies.ml_alpha import MLAlphaConfig
+
+    mom = defaults.get("momentum", {}) or {}
+    ml_raw = dict(defaults.get("ml_alpha", {}) or {})
+    xs = LongOnlyXSMOMConfig(
+        lookback_bars=int(mom.get("xsmom_lookback_bars", 252)),
+        skip_bars=int(mom.get("xsmom_skip_bars", 21)),
+        top_k=int(mom.get("xsmom_top_k", 5)),
+        top_frac=float(mom.get("xsmom_top_frac", 0.10)),
+        max_weight=0.20,
+    )
+    ts = LongOnlyTSMOMConfig(
+        lookback_bars=int(mom.get("tsmom_lookback_bars", 252)),
+        skip_bars=int(mom.get("tsmom_skip_bars", 21)),
+        vol_window=int(mom.get("tsmom_vol_window", 63)),
+        max_weight=0.20,
+    )
+    ml = MLAlphaConfig(**{k: v for k, v in ml_raw.items() if k in MLAlphaConfig.model_fields})
+    return xs, ts, ml
+
+
+def _regime_cfg(enabled: bool, risk_off_exposure: float, ma_window: int = 200):
+    from app.strategies.long_only_momentum import RegimeFilterConfig
+
+    return RegimeFilterConfig(enabled=enabled, risk_off_exposure=risk_off_exposure,
+                              ma_window=ma_window)
+
+
+def _build_long_only(strategy: str, defaults: dict, universe: str, interval: str,
+                     regime, reb_every: int, record_history: bool = False):
+    """Return (weight_fn, names). `weight_fn` is the long-only book to backtest."""
+    from app.core.math_utils import periods_per_year
+    from app.strategies.ensemble import EnsembleConfig
+    from app.strategies.long_only_ensemble import build_long_only_ensemble
+    from app.strategies.long_only_ml_alpha import make_long_only_ml_alpha
+    from app.strategies.long_only_momentum import (
+        make_long_only_tsmom_weight_fn,
+        make_long_only_xsmom_weight_fn,
+    )
+
+    xs, ts, ml = _long_only_configs(defaults)
+    if strategy == "long_only_xsec_momentum":
+        return make_long_only_xsmom_weight_fn(xs.model_copy(update={"regime": regime})), [strategy]
+    if strategy == "long_only_tsmom":
+        return make_long_only_tsmom_weight_fn(ts.model_copy(update={"regime": regime})), [strategy]
+    if strategy == "long_only_ml_alpha":
+        return make_long_only_ml_alpha(ml, regime=regime), [strategy]
+    if strategy == "long_only_ensemble":
+        ens_raw = defaults.get("ensemble", {}) or {}
+        bpy = _bars_per_year(universe, interval) or periods_per_year(interval)
+        ens_cfg = EnsembleConfig(
+            vol_window=int(ens_raw.get("vol_window", 60)),
+            min_observations=int(ens_raw.get("min_observations", 20)),
+            gross_target=1.0, max_sleeve_share=float(ens_raw.get("max_sleeve_share", 0.60)),
+            min_sleeve_t=float(ens_raw.get("min_sleeve_t", 0.0)), cost_bps=5.0,
+            target_vol_pct=float(ens_raw.get("target_vol_pct", 10)),
+            rebalances_per_year=bpy / reb_every, alloc_mode="inverse_vol",
+        )
+        ens = build_long_only_ensemble(
+            xsmom=xs, tsmom=ts, ml=ml, ensemble_config=ens_cfg, regime=regime,
+            gross_cap=1.0, max_position=0.20, record_history=record_history)
+        return ens, list(ens.ensemble.sleeves)
+    raise typer.BadParameter(f"unknown long-only strategy {strategy!r}; "
+                             f"choose from {LONG_ONLY_STRATEGIES}")
+
+
+def _load_benchmarks(storage, interval: str, names=("SPY", "QQQ")):
+    """Total-return benchmark close series from storage; {} if none stored."""
+    from app.data.market_data import build_price_matrix
+
+    out = {}
+    for sym in names:
+        try:
+            pm = build_price_matrix(storage, [sym], interval, adjusted=True, min_rows=50)
+            out[sym] = pm.close[sym]
+        except Exception:  # noqa: BLE001 - missing benchmark is non-fatal
+            pass
+    return out
+
+
+def _long_only_setup(storage, universe, interval, reb_every_override=None):
+    from app.backtesting.basket_engine import BasketConfig
+    from app.data.market_data import build_price_matrix
+    from app.data.universe import get_universe
+
+    defaults = _strategy_defaults(interval)
+    basket_raw = defaults.get("basket", {}) or {}
+    # long-only momentum rebalances WEEKLY by default (5 daily bars): the
+    # signals use 252-day lookbacks, so the flagship's daily cadence only
+    # churns turnover/costs for no extra edge.
+    reb_every = reb_every_override or 5
+    prices = build_price_matrix(storage, get_universe(universe), interval, adjusted=True)
+    _print_adjustment_status(prices, universe, interval)
+    config = BasketConfig(
+        interval=interval, fit_window=int(basket_raw.get("fit_window", 300)),
+        rebalance_every=reb_every, cost_bps=float(basket_raw.get("cost_bps", 5)),
+        bars_per_year=_bars_per_year(universe, interval), fill="next_open",
+        borrow_bps_annual=0.0, margin_bps_annual=0.0, label="long_only",
+    )
+    return defaults, prices, config, reb_every
+
+
+@app.command("backtest-long-only")
+def backtest_long_only(
+    strategy: str = typer.Option("long_only_ensemble", help=" | ".join(LONG_ONLY_STRATEGIES)),
+    universe: str = typer.Option("us_stocks_50"),
+    interval: str = typer.Option("1d"),
+    rebalance_every: int | None = typer.Option(None, help="bars between rebalances"),
+    regime: bool = typer.Option(True, "--regime/--no-regime",
+                                help="risk-off cash filter (market below its 200d MA)"),
+    risk_off_exposure: float = typer.Option(0.0, help="gross when risk-off (0 = full cash)"),
+) -> None:
+    """Backtest a long-only book against buy-and-hold benchmarks (Path A).
+
+    A long-only Invest/ISA book must beat simply holding SPY on a RISK-ADJUSTED
+    basis, not just in a bull market — that comparison is the whole point here.
+    NOT market-neutral: direction risk is the dominant risk."""
+    settings, storage = _bootstrap()
+    from app.backtesting.long_only_engine import run_long_only_backtest
+
+    defaults, prices, config, reb_every = _long_only_setup(
+        storage, universe, interval, rebalance_every)
+    regime_cfg = _regime_cfg(regime, risk_off_exposure)
+    fn, names = _build_long_only(strategy, defaults, universe, interval, regime_cfg, reb_every)
+    benchmarks = _load_benchmarks(storage, interval)
+    console.print(f"Long-only backtest: [bold]{strategy}[/bold] ({' + '.join(names)}) on "
+                  f"{universe}, regime={'on' if regime else 'off'}...")
+    result = run_long_only_backtest(prices.close, fn, config, aux=prices.aux,
+                                    open_=prices.open, benchmarks=benchmarks)
+    _record_experiment(
+        storage, kind="long_only", strategy=strategy, universe=universe,
+        interval=interval, metrics=result.metrics, prices=prices,
+        config={"strategy": strategy, "regime": regime,
+                "risk_off_exposure": risk_off_exposure, "rebalance_every": reb_every},
+        notes="long-only directional book (Trading 212 Invest/ISA); NOT market-neutral",
+    )
+    table = Table(title=f"Long-only metrics — {strategy}")
+    table.add_column("metric")
+    table.add_column("value", justify="right")
+    for key, value in result.metrics.items():
+        table.add_row(key, str(value))
+    console.print(table)
+    _print_long_only_comparison(result.comparison)
+    for warning in result.warnings:
+        console.print(f"[dim]- {warning}[/dim]")
+
+
+def _print_long_only_comparison(comp: dict) -> None:
+    console.print(f"\n[bold]Book vs benchmarks[/bold] (primary: {comp['primary_benchmark']})")
+    table = Table()
+    for col in ("series", "total_return%", "sharpe", "beta", "alpha_ann%", "info_ratio"):
+        table.add_column(col, justify="right")
+    table.add_row("[bold]long-only book[/bold]",
+                  str(comp["book_total_return_pct"]), str(comp["book_sharpe"]), "—", "—", "—")
+    for name, m in comp["benchmarks"].items():
+        mark = " *" if m.get("is_primary") else ""
+        table.add_row(name + mark, str(m["total_return_pct"]), str(m["sharpe"]),
+                      str(m["beta"]), str(m["alpha_ann_pct_vs_this"]), str(m["info_ratio"]))
+    console.print(table)
+    verdict_c = "green" if comp["beats_benchmark_sharpe"] else "red"
+    console.print(f"beats primary benchmark Sharpe: [{verdict_c}]{comp['beats_benchmark_sharpe']}[/] "
+                  f"| positive alpha: [{verdict_c}]{comp['positive_alpha']}[/] "
+                  f"| cash drag {comp['cash_drag_pct']}%")
+
+
+@app.command("compare-long-only")
+def compare_long_only(
+    universe: str = typer.Option("us_stocks_50"),
+    interval: str = typer.Option("1d"),
+    benchmark: str = typer.Option("SPY", help="primary benchmark symbol"),
+    rebalance_every: int | None = typer.Option(None),
+) -> None:
+    """Compare every long-only variant + market-neutral flagship + benchmarks.
+
+    One table: each long-only sleeve, the long-only ensemble, the market-neutral
+    ensemble (for reference — it cannot trade on Invest/ISA), and buy-and-hold
+    SPY/QQQ/equal-weight. Answers: does any tradable long-only book beat just
+    buying the index, risk-adjusted?"""
+    settings, storage = _bootstrap()
+    import pandas as pd
+
+    from app.backtesting.basket_engine import run_basket_backtest
+    from app.backtesting.long_only_engine import run_long_only_backtest
+
+    defaults, prices, config, reb_every = _long_only_setup(
+        storage, universe, interval, rebalance_every)
+    benchmarks = _load_benchmarks(storage, interval, names=(benchmark, "QQQ"))
+    regime_cfg = _regime_cfg(True, 0.0)
+    rows = []
+    for strat in LONG_ONLY_STRATEGIES:
+        fn, _ = _build_long_only(strat, defaults, universe, interval, regime_cfg, reb_every)
+        res = run_long_only_backtest(prices.close, fn, config, aux=prices.aux,
+                                     open_=prices.open, benchmarks=benchmarks)
+        c = res.comparison
+        rows.append({"book": strat, "total_return_pct": res.metrics.get("total_return_pct"),
+                     "sharpe": c["book_sharpe"], "max_dd_pct": res.metrics.get("max_drawdown_pct"),
+                     "turnover": res.metrics.get("turnover"),
+                     "beats_bench": c["beats_benchmark_sharpe"], "alpha+": c["positive_alpha"]})
+    # benchmarks row(s)
+    last = res.comparison["benchmarks"]
+    for name, m in last.items():
+        rows.append({"book": f"[bench] {name}", "total_return_pct": m["total_return_pct"],
+                     "sharpe": m["sharpe"], "max_dd_pct": None, "turnover": None,
+                     "beats_bench": None, "alpha+": None})
+    df = pd.DataFrame(rows).set_index("book")
+    console.print(f"\nLong-only comparison — {universe} (primary benchmark {benchmark})")
+    console.print(df)
+    out = settings.reports_dir / f"compare_long_only_{universe}_{interval}.md"
+    out.write_text(f"# Long-only comparison — {universe} ({interval})\n\n"
+                   + df.to_markdown() + "\n", encoding="utf-8")
+    console.print(f"[green]Report:[/green] {out}")
+
+
+@app.command("long-only-readiness")
+def long_only_readiness(
+    strategy: str = typer.Option("long_only_ensemble"),
+    universe: str = typer.Option("us_stocks_50"),
+    interval: str = typer.Option("1d"),
+    n_folds: int = typer.Option(3),
+    rebalance_every: int | None = typer.Option(None),
+) -> None:
+    """Long-only paper-readiness gate (Path A). NEVER asserts live eligibility.
+
+    Runs the full battery — beats-benchmark, walk-forward OOS, cost stress,
+    concentration gate, turnover — and prints PASS/FAIL plus the paper-trading
+    plan. The best a long-only book can earn here is 'paper-trading eligible'."""
+    settings, storage = _bootstrap()
+    from app.backtesting.basket_engine import run_basket_backtest
+    from app.backtesting.concentration import analyze_concentration
+    from app.backtesting.long_only_engine import _long_only_guard, run_long_only_backtest
+    from app.backtesting.stress_tests import run_basket_stress_suite
+    from app.backtesting.walk_forward import run_basket_holdout
+    from app.data.universe import get_sectors
+
+    defaults, prices, config, reb_every = _long_only_setup(
+        storage, universe, interval, rebalance_every)
+    regime_cfg = _regime_cfg(True, 0.0)
+    benchmarks = _load_benchmarks(storage, interval)
+
+    def factory():
+        fn, _ = _build_long_only(strategy, defaults, universe, interval, regime_cfg, reb_every)
+        return _long_only_guard(fn, 0.20, 1.0)
+
+    console.print(f"Long-only readiness: [bold]{strategy}[/bold] on {universe}...")
+    fn, names = _build_long_only(strategy, defaults, universe, interval, regime_cfg, reb_every)
+    result = run_long_only_backtest(prices.close, fn, config, aux=prices.aux,
+                                    open_=prices.open, benchmarks=benchmarks)
+    conc = analyze_concentration(result.equity, close=prices.close,
+                                 weights_df=result.book.weights, sectors=get_sectors(universe))
+    wf = run_basket_holdout(prices.close, factory, config, n_folds=n_folds,
+                            aux=prices.aux, open_=prices.open)
+    stress = run_basket_stress_suite(prices.close, factory, config,
+                                     aux=prices.aux, open_=prices.open)
+
+    c = result.comparison
+    turnover = float(result.metrics.get("turnover") or 0)
+    checks = {
+        "beats primary benchmark (Sharpe)": c["beats_benchmark_sharpe"],
+        "positive alpha vs benchmark": c["positive_alpha"],
+        "OOS walk-forward Sharpe > 0.3": float(wf.summary.get("oos_sharpe_mean") or 0) > 0.3,
+        "survives costs x2 (positive)": float(stress.loc["costs_x2", "total_return_pct"] or 0) > 0,
+        "survives costs x3 (positive)": float(stress.loc["costs_x3", "total_return_pct"] or 0) > 0,
+        "concentration: no month > 25%": (conc.max_month_pct or 0) <= 25.0,
+        "turnover acceptable (< 50x/yr)": turnover < 50.0,
+    }
+    _print_long_only_comparison(c)
+    console.print(f"\n[bold]Walk-forward[/bold]: OOS Sharpe {wf.summary.get('oos_sharpe_mean')}, "
+                  f"{wf.summary.get('oos_folds_positive')}/{wf.summary.get('oos_folds')} folds positive")
+    console.print(f"[bold]Concentration score[/bold]: {conc.concentration_score()}/100 "
+                  f"(max month {conc.max_month_pct}%)")
+    console.print(f"[bold]Turnover[/bold]: {turnover}x/yr")
+    console.print("\n[bold]Readiness gate[/bold]")
+    for name, ok in checks.items():
+        console.print(f"  [{'green' if ok else 'red'}]{'PASS' if ok else 'FAIL'}[/] {name}")
+    passed = sum(1 for v in checks.values() if v)
+    eligible = all(checks.values())
+    verdict = ("[green]PAPER-TRADING ELIGIBLE[/green]" if eligible
+               else f"[yellow]NOT YET PAPER-ELIGIBLE ({passed}/{len(checks)} gates)[/yellow]")
+    console.print(f"\nVerdict: {verdict}")
+    console.print("[bold red]NOT LIVE ELIGIBLE[/bold red] — paper/shadow only; no Invest/ISA "
+                  "order endpoint is wired and a supervised paper period must pass first.")
+    out = settings.reports_dir / f"long_only_readiness_{strategy}_{universe}.md"
+    lines = [f"# Long-only readiness — {strategy} ({universe}, {interval})", "",
+             f"Verdict: **{'PAPER-TRADING ELIGIBLE' if eligible else 'NOT YET PAPER-ELIGIBLE'}** "
+             f"({passed}/{len(checks)} gates)", "", "**NOT LIVE ELIGIBLE.**", "",
+             "## Gate checks", ""]
+    lines += [f"- {'PASS' if ok else 'FAIL'} — {n}" for n, ok in checks.items()]
+    lines += ["", "## Book vs benchmarks", "",
+              f"- book Sharpe {c['book_sharpe']}, return {c['book_total_return_pct']}%",
+              f"- primary benchmark {c['primary_benchmark']}: "
+              f"{c['benchmarks'].get(c['primary_benchmark'], {})}",
+              f"- walk-forward OOS Sharpe {wf.summary.get('oos_sharpe_mean')}",
+              f"- concentration score {conc.concentration_score()}/100", ""]
+    out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    console.print(f"[green]Report:[/green] {out}")
+    if not eligible:
+        raise typer.Exit(1)
+
+
+def _synthetic_trading212_instruments(symbols: list[str]) -> dict:
+    """Offline Invest/ISA instrument stubs for shadow planning: every name is an
+    equity, fractional, penny tick. The live demo connector (Phase 5) replaces
+    this with the broker's real instrument list."""
+    from app.brokers.models import Instrument
+    from app.core.types import AssetClass
+
+    return {s: Instrument(broker="trading212", symbol=s, asset_class=AssetClass.EQUITY,
+                          tick_size=0.01, step_size=0.0001, min_notional=1.0,
+                          fractional=True, shortable=False) for s in symbols}
+
+
+@app.command("paper-trade-long-only")
+def paper_trade_long_only(
+    strategy: str = typer.Option("long_only_ensemble"),
+    broker: str = typer.Option("trading212"),
+    mode: str = typer.Option("shadow", help="shadow (plan only) | demo (Phase 5 demo connector)"),
+    universe: str = typer.Option("us_stocks_50"),
+    interval: str = typer.Option("1d"),
+    starting_cash: float = typer.Option(10_000.0),
+) -> None:
+    """Shadow-plan today's long-only orders for Trading 212 Invest/ISA (Path A).
+
+    Computes target weights on the latest bar and turns them into a concrete
+    Trading 212 order plan (no short, no margin, fractional shares, limit-order
+    preference, market-hours awareness) — WITHOUT sending anything. The full
+    supervised paper/demo loop with simulated fills + TCA is the Phase 5 layer."""
+    settings, storage = _bootstrap()
+    if broker != "trading212":
+        raise typer.BadParameter("Path A targets Trading 212 Invest/ISA only.")
+    if mode == "demo":
+        console.print("[yellow]Demo-connector paper trading is the Phase 5 layer "
+                      "(shadow-start/paper-start). Running SHADOW plan instead.[/yellow]")
+    from app.execution.trading212_rebalancer import RebalanceConfig, Trading212Rebalancer
+
+    defaults, prices, config, reb_every = _long_only_setup(storage, universe, interval)
+    regime_cfg = _regime_cfg(True, 0.0)
+    fn, names = _build_long_only(strategy, defaults, universe, interval, regime_cfg, reb_every)
+    window = prices.close.iloc[-config.fit_window:]
+    aux_window = {k: v.iloc[-config.fit_window:] for k, v in prices.aux.items()}
+    weights = (fn(window, aux=aux_window) if getattr(fn, "wants_aux", False)
+               else fn(window))
+    weights = weights.clip(lower=0.0)
+    last_prices = {s: float(prices.close[s].iloc[-1]) for s in prices.symbols}
+
+    instruments = _synthetic_trading212_instruments(prices.symbols)
+    reb = Trading212Rebalancer(instruments, RebalanceConfig())
+    plan = reb.plan({s: float(w) for s, w in weights.items()}, positions={},
+                    cash=starting_cash, prices=last_prices, market_open=False)
+    console.print(f"[bold green]SHADOW plan[/bold green] — {strategy} on {universe} "
+                  f"({broker}). [bold]NO REAL ORDERS.[/bold]")
+    console.print(f"target names: {int((weights > 0).sum())}, "
+                  f"gross {float(weights.sum()):.2%}, cash buffer {plan.summary()}")
+    table = Table(title="Planned orders (shadow)")
+    for col in ("symbol", "side", "type", "qty", "limit", "notional", "tgt_wt"):
+        table.add_column(col, justify="right")
+    for o in sorted(plan.orders, key=lambda x: -x.request.notional)[:25]:
+        r = o.request
+        table.add_row(r.symbol, r.side.value, r.order_type.value, f"{r.quantity:.4f}",
+                      f"{r.limit_price:.2f}" if r.limit_price else "—",
+                      f"{r.notional:.2f}", f"{o.weight_after:.2%}")
+    console.print(table)
+    for sym, reason in plan.skipped[:10]:
+        console.print(f"[dim]skipped {sym}: {reason}[/dim]")
+    for note in plan.notes:
+        console.print(f"[dim]- {note}[/dim]")
 
 
 @app.command("paper-trade-basket")
