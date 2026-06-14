@@ -103,17 +103,28 @@ def run_long_only_backtest(
     benchmarks: dict[str, pd.Series] | None = None,
     max_position: float = 0.20,
     gross_cap: float = 1.0,
+    smoothing=None,
 ) -> LongOnlyResult:
     """Run the long-only book and compare it to buy-and-hold benchmarks.
 
     `benchmarks` maps name -> raw price series (e.g. {"SPY": spy_close}). The
     equal-weight-universe benchmark is always added. Financing is forced to zero
-    (a long-only Invest/ISA book pays neither borrow nor margin)."""
+    (a long-only Invest/ISA book pays neither borrow nor margin).
+
+    `smoothing` (a SmoothingConfig) optionally wraps `weight_fn` with a stateful
+    target-weight smoother BEFORE the long-only guard, for callers that pass a
+    bare weight fn. Strategies that already smooth internally pass None here to
+    avoid double-smoothing."""
     cfg = config
     # enforce the no-borrow / no-margin reality regardless of what was passed
     if cfg.borrow_bps_annual or cfg.margin_bps_annual:
         cfg = BasketConfig(**{**cfg.__dict__, "borrow_bps_annual": 0.0, "margin_bps_annual": 0.0})
 
+    if smoothing is not None and getattr(smoothing, "method", "none") != "none":
+        from app.strategies.weight_smoothing import SmoothingWeightFn
+
+        weight_fn = SmoothingWeightFn(weight_fn, smoothing, max_weight=max_position,
+                                      gross_target=gross_cap)
     guarded = _long_only_guard(weight_fn, max_position, gross_cap)
     book = run_basket_backtest(close, guarded, cfg, aux=aux, open_=open_)
     equity = book.equity.dropna()

@@ -102,6 +102,89 @@ def short_squeeze(close: pd.DataFrame, *, window_frac: float = 0.08,
                           lookback=lookback)
 
 
+def covid_crash_rebound(close: pd.DataFrame, *, crash: float = -0.34, rebound: float = 0.25,
+                        at_frac: float = 0.82, crash_bars: int = 20,
+                        rebound_bars: int = 40) -> pd.DataFrame:
+    """A 2020-style V: a fast broad crash over `crash_bars`, then a sharp rebound
+    over `rebound_bars`. Tests both the drawdown AND the long-only book's ability
+    to get re-invested into the recovery (the regime filter's whipsaw risk)."""
+    out = close.copy()
+    n = len(close)
+    start = max(1, int(n * at_frac))
+    end_crash = min(n, start + crash_bars)
+    end_reb = min(n, end_crash + rebound_bars)
+    if end_crash <= start:
+        return out
+    crash_path = np.linspace(0.0, crash, end_crash - start)
+    out.iloc[start:end_crash] = close.iloc[start:end_crash].to_numpy() * (1.0 + crash_path)[:, None]
+    floor = out.iloc[end_crash - 1]
+    if end_reb > end_crash:
+        reb_path = np.linspace(0.0, rebound, end_reb - end_crash)
+        out.iloc[end_crash:end_reb] = floor.to_numpy() * (1.0 + reb_path)[:, None]
+        tail = out.iloc[end_reb - 1] / close.iloc[end_reb - 1] if end_reb < n else None
+        if tail is not None:
+            out.iloc[end_reb:] = close.iloc[end_reb:].to_numpy() * tail.to_numpy()
+    return out
+
+
+def sustained_bear(close: pd.DataFrame, *, total: float = -0.45,
+                   window_frac: float = 0.25) -> pd.DataFrame:
+    """A 2008-style grinding bear: a deep, sustained drawdown spread over a long
+    trailing window (not a single gap), the regime in which a long book bleeds."""
+    out = close.copy()
+    n = len(close)
+    sl = _window_slice(n, window_frac)
+    k = n - sl.start
+    path = np.linspace(0.0, total, k)
+    out.iloc[sl] = close.iloc[sl].to_numpy() * (1.0 + path)[:, None]
+    out.iloc[sl.stop:] = close.iloc[sl.stop:].to_numpy() * (1.0 + total) if sl.stop < n else out.iloc[sl.stop:]
+    return out
+
+
+def vol_whipsaw(close: pd.DataFrame, *, window_frac: float = 0.12,
+                amp: float = 0.06, period: int = 4) -> pd.DataFrame:
+    """Alternating large up/down bars (a whipsaw that punishes a slow-to-react,
+    smoothed book and churns a fast one)."""
+    out = close.copy()
+    n = len(close)
+    sl = _window_slice(n, window_frac)
+    k = n - sl.start
+    osc = amp * np.sign(np.sin(np.arange(k) * 2 * np.pi / period))
+    base = close.iloc[sl.start - 1]
+    factors = np.cumprod(1.0 + np.outer(osc, np.ones(close.shape[1])), axis=0)
+    out.iloc[sl] = base.to_numpy() * factors
+    return out
+
+
+def gap_up_after_crash(close: pd.DataFrame, *, crash: float = -0.18,
+                       gap_up: float = 0.10, at_frac: float = 0.86) -> pd.DataFrame:
+    """A short crash then a gap UP (a relief rally a de-risked book can miss)."""
+    out = market_gap(close, gap=crash, at_frac=at_frac)
+    n = len(out)
+    j = min(n - 1, int(n * (at_frac + 0.06)))
+    out.iloc[j:] = out.iloc[j:].to_numpy() * (1.0 + gap_up)
+    return out
+
+
+def sector_shock(close: pd.DataFrame, members: list[str], *, window_frac: float = 0.1,
+                 magnitude: float = -0.35) -> pd.DataFrame:
+    """Crash a single sector's names (e.g. a tech-sector blow-up) over the window,
+    leaving the rest of the universe alone — tests concentration in one sector."""
+    out = close.copy()
+    n = len(close)
+    sl = _window_slice(n, window_frac)
+    k = n - sl.start
+    hit = [m for m in members if m in close.columns]
+    if not hit or k <= 0:
+        return out
+    path = np.linspace(0.0, magnitude, k)
+    out.loc[out.index[sl], hit] = close.loc[close.index[sl], hit].to_numpy() * (1.0 + path)[:, None]
+    out.loc[out.index[sl.stop:], hit] = (
+        close.loc[close.index[sl.stop:], hit].to_numpy() * (1.0 + magnitude)
+        if sl.stop < n else out.loc[out.index[sl.stop:], hit])
+    return out
+
+
 SCENARIOS: dict[str, Callable[[pd.DataFrame], pd.DataFrame]] = {
     "momentum_crash": lambda c: momentum_crash(c),
     "correlation_spike": lambda c: correlation_spike(c),
@@ -109,6 +192,32 @@ SCENARIOS: dict[str, Callable[[pd.DataFrame], pd.DataFrame]] = {
     "market_gap": lambda c: market_gap(c),
     "short_squeeze": lambda c: short_squeeze(c),
 }
+
+
+def long_only_scenarios(sectors: dict[str, str] | None = None) -> dict:
+    """The expanded crisis suite for a long-only book: the base scenarios plus a
+    synthetic 2008 grinding bear, a 2020 COVID crash/rebound, a vol whipsaw, a
+    gap-up-after-crash relief rally, and (when sectors are known) a tech-sector
+    crash and a broad sector-rotation shock."""
+    scen: dict[str, Callable[[pd.DataFrame], pd.DataFrame]] = dict(SCENARIOS)
+    scen.update({
+        "covid_crash_rebound": lambda c: covid_crash_rebound(c),
+        "sustained_bear_2008": lambda c: sustained_bear(c),
+        "vol_whipsaw": lambda c: vol_whipsaw(c),
+        "gap_up_after_crash": lambda c: gap_up_after_crash(c),
+    })
+    if sectors:
+        by_sector: dict[str, list[str]] = {}
+        for sym, sec in sectors.items():
+            by_sector.setdefault(sec, []).append(sym)
+        tech = by_sector.get("tech") or by_sector.get("technology")
+        if tech:
+            scen["tech_sector_crash"] = lambda c, m=tech: sector_shock(c, m)
+        biggest = max(by_sector.values(), key=len) if by_sector else None
+        if biggest:
+            scen["sector_rotation_shock"] = lambda c, m=biggest: sector_shock(
+                c, m, window_frac=0.12, magnitude=-0.25)
+    return scen
 
 
 def _crisis_metrics(equity: pd.Series, window_frac: float = 0.12) -> dict:

@@ -31,6 +31,7 @@ import pandas as pd
 from pydantic import BaseModel
 
 from app.backtesting.basket_engine import WeightFn
+from app.strategies.weight_smoothing import SmoothingConfig, WeightSmoother
 
 
 class RegimeFilterConfig(BaseModel):
@@ -49,6 +50,7 @@ class LongOnlyXSMOMConfig(BaseModel):
     vol_window: int = 60
     max_weight: float = 0.20       # per-name cap (concentration control)
     regime: RegimeFilterConfig = RegimeFilterConfig()
+    smoothing: SmoothingConfig = SmoothingConfig()   # target-weight smoothing (Phase 1)
 
 
 class LongOnlyTSMOMConfig(BaseModel):
@@ -58,6 +60,7 @@ class LongOnlyTSMOMConfig(BaseModel):
     gross_target: float = 1.0
     max_weight: float = 0.20
     regime: RegimeFilterConfig = RegimeFilterConfig()
+    smoothing: SmoothingConfig = SmoothingConfig()   # target-weight smoothing (Phase 1)
 
 
 def regime_scalar(close_window: pd.DataFrame, cfg: RegimeFilterConfig,
@@ -86,22 +89,24 @@ def _momentum(close_window: pd.DataFrame, lookback: int, skip: int) -> pd.Series
 
 def make_long_only_xsmom_weight_fn(config: LongOnlyXSMOMConfig | None = None) -> WeightFn:
     cfg = config or LongOnlyXSMOMConfig()
+    smoother = WeightSmoother(cfg.smoothing, max_weight=cfg.max_weight,
+                              gross_target=cfg.gross_target)
 
     def weight_fn(close_window: pd.DataFrame) -> pd.Series:
         zero = pd.Series(0.0, index=close_window.columns)
         mom = _momentum(close_window, cfg.lookback_bars, cfg.skip_bars)
         if mom is None:
-            return zero
+            return smoother.smooth(zero)
         mom = mom.dropna()
         if mom.empty:
-            return zero
+            return smoother.smooth(zero)
         top_k = cfg.top_k
         if cfg.top_frac > 0:
             top_k = max(1, round(cfg.top_frac * close_window.shape[1]))
         # only POSITIVE-momentum names are eligible (no buying falling knives)
         winners = mom[mom > 0].nlargest(top_k).index
         if len(winners) == 0:
-            return zero
+            return smoother.smooth(zero)
         if cfg.vol_weight:
             rets = np.log(close_window[winners]).diff().iloc[-cfg.vol_window:]
             inv = 1.0 / rets.std(ddof=1).replace(0.0, np.nan)
@@ -112,30 +117,38 @@ def make_long_only_xsmom_weight_fn(config: LongOnlyXSMOMConfig | None = None) ->
         weights = weights.clip(upper=cfg.max_weight)
         weights = weights / weights.sum()        # renormalize to fully invested
         exposure = cfg.gross_target * regime_scalar(close_window, cfg.regime)
-        return (weights * exposure).reindex(close_window.columns).fillna(0.0)
+        target = (weights * exposure).reindex(close_window.columns).fillna(0.0)
+        # smooth target weights before they leave the strategy (Phase 1): blends
+        # with the previously emitted book to spread rebalances (and therefore
+        # PnL) across more bars, shrinking single-month concentration. method=
+        # "none" (the default) is an exact pass-through.
+        return smoother.smooth(target)
 
     return weight_fn
 
 
 def make_long_only_tsmom_weight_fn(config: LongOnlyTSMOMConfig | None = None) -> WeightFn:
     cfg = config or LongOnlyTSMOMConfig()
+    smoother = WeightSmoother(cfg.smoothing, max_weight=cfg.max_weight,
+                              gross_target=cfg.gross_target)
 
     def weight_fn(close_window: pd.DataFrame) -> pd.Series:
         zero = pd.Series(0.0, index=close_window.columns)
         mom = _momentum(close_window, cfg.lookback_bars, cfg.skip_bars)
         if mom is None:
-            return zero
+            return smoother.smooth(zero)
         eligible = mom[mom > 0].dropna().index   # only up-trending names
         if len(eligible) == 0:
-            return zero
+            return smoother.smooth(zero)
         rets = np.log(close_window[eligible]).diff().iloc[-cfg.vol_window:]
         inv = 1.0 / rets.std(ddof=1).replace(0.0, np.nan)
         w = inv.replace([np.inf, -np.inf], np.nan).dropna()
         if w.empty:
-            return zero
+            return smoother.smooth(zero)
         weights = (w / w.sum()).clip(upper=cfg.max_weight)
         weights = weights / weights.sum()
         exposure = cfg.gross_target * regime_scalar(close_window, cfg.regime)
-        return (weights * exposure).reindex(close_window.columns).fillna(0.0)
+        target = (weights * exposure).reindex(close_window.columns).fillna(0.0)
+        return smoother.smooth(target)
 
     return weight_fn

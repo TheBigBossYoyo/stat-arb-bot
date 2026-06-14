@@ -58,6 +58,12 @@ class Settings(BaseSettings):
     trading212_api_key: str = ""
     trading212_api_secret: str = ""
     trading212_account_type: Literal["invest", "isa"] = "invest"
+    # Demo order submission requires this explicit flag (Phase 5). Live order
+    # submission is HARD-BLOCKED for this product: trading212_allow_live_orders
+    # is never consulted by the demo executor — it exists only so an operator
+    # cannot believe a single env var would enable live (it would not).
+    trading212_allow_demo_orders: bool = False
+    trading212_allow_live_orders: bool = False
 
     # --- research data provider -------------------------------------------------
     data_provider: str = "binance"

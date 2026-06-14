@@ -160,7 +160,7 @@ class ConcentrationReport:
             parts.append(min(self.asset_herfindahl * 100.0, 100.0))
         return round(float(np.mean(parts)) if parts else 0.0, 1)
 
-    def gate(self) -> "ConcentrationGate":
+    def gate(self) -> ConcentrationGate:
         return concentration_gate(self)
 
     def to_flat(self) -> dict:

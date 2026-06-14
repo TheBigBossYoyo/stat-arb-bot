@@ -17,7 +17,6 @@ from app.risk.borrow_risk import (
 )
 from app.risk.shorting_risk import ShortingConstraints, screen_short_book
 
-
 # --- Phase 2: trial manifest ---------------------------------------------------
 
 def test_manifest_has_real_search_breadth():

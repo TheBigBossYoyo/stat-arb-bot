@@ -25,8 +25,6 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from app.core.types import utc_now
-
 
 @dataclass
 class ShadowOrder:

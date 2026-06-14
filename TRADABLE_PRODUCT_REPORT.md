@@ -1,16 +1,19 @@
 # TRADABLE PRODUCT REPORT — stat-arb-bot
 
-**Date:** 2026-06-13
+**Date:** 2026-06-14 (paper-readiness sprint; supersedes the 2026-06-13 verdict)
 **Scope:** the tradable-product engagement — turn the research candidate into a
 deployable product across three paths (A long-only equity, B crypto futures,
 C margin-broker abstraction) and close the FINAL_RESEARCH_REPORT blockers.
 
-> **One-line verdict:** **No product is live-eligible, and none is yet
-> paper/testnet-eligible.** The honest lead candidate is the **long-only Trading
-> 212 book** (closest to a paper period, real venue, lower fundamental risk).
-> The original market-neutral flagship is **not tradable** and, corrected for the
-> real trial search, **fails its deflated Sharpe** — it is an unproven candidate,
-> not an edge.
+> **One-line verdict:** **No product is live-eligible.** But the **long-only
+> Trading 212 book is now ELIGIBLE TO BEGIN a supervised paper/shadow period** —
+> EWMA target-weight smoothing closed its one failing gate (return concentration:
+> worst month 26.1% → 23.5%) without breaking out-of-sample performance, the
+> Trading 212 **demo** order path is wired (live hard-blocked), and the
+> survivorship/crisis/paper-workflow gates are complete. See
+> `PAPER_ELIGIBILITY_REPORT.md`. The market-neutral flagship is still **not
+> tradable** (no shorting venue) and **fails its deflated Sharpe**; crypto futures
+> is still testnet/research-only.
 
 Run it yourself: `statarb product-decision`.
 
@@ -35,21 +38,26 @@ Run it yourself: `statarb product-decision`.
 
 ## Is the Trading 212 long-only version viable?
 
-**Yes as a research product, and it is the lead candidate — but not yet
-paper-eligible.** It is a *different, directional* strategy (NOT market-neutral):
-rank by momentum, buy the leaders, hold cash instead of shorting.
+**Yes — and it is now ELIGIBLE TO BEGIN a supervised paper/shadow period.** It is
+a *different, directional* strategy (NOT market-neutral): rank by momentum, buy
+the leaders, hold cash instead of shorting.
 
-- `long_only_xsec_momentum`: **+311%** over 3.8y, **Sharpe 1.53**, max DD −17%,
-  turnover 42×/yr. **Beats SPY (Sharpe 1.05), QQQ (1.11) and equal-weight (1.33)
-  on risk-adjusted return**, with **+23%/yr alpha** vs SPY and info ratio ≈ 1.0.
-  Walk-forward OOS Sharpe **1.71**. Readiness: **6/7 gates** — fails only
-  concentration (worst month 26.1% vs the 25% limit).
-- `long_only_ensemble` (incl. ML): highest **Sharpe 1.67** (smoothest) but ~0
-  alpha vs SPY and 38% cash drag — a low-risk equity sleeve, not an alpha story.
+- `long_only_xsec_momentum` with the validated **EWMA α=0.5** smoothing default:
+  **+259%** over 3.8y, **Sharpe 1.44**, max DD −16.9%, turnover 30×/yr. **Beats
+  SPY (1.05), QQQ (1.11) and equal-weight (1.33)** risk-adjusted, **+19.6%/yr
+  alpha** vs SPY (IR 0.90). Walk-forward OOS Sharpe **1.65, 2/2 folds**. Worst
+  month **23.5%** (≤25% PASS). **All 15 research + operational gates pass.**
+  (Unsmoothed it was +311% / Sharpe 1.53 / worst month 26.1% — failed only
+  concentration; smoothing trades a little headline return for the gate, lower
+  turnover and a slightly better drawdown.)
+- `long_only_ensemble` (incl. ML): highest **Sharpe** (smoothest) but ~0 alpha vs
+  SPY and high cash drag — a low-risk equity sleeve, not an alpha story.
 
-Blockers: the concentration gate (apply the Phase 1 EWMA-smoothing mitigation),
-a supervised paper period, the survivorship caveat, and wiring the T212 demo
-order path. **Verdict: NOT YET paper-eligible (6/7).**
+Status: concentration **closed** (Phase 1 EWMA smoothing), survivorship
+**bounded** (Phase 3), crisis **tested** (Phase 4, synthetic), T212 **demo order
+path wired** (Phase 5), supervised-period **workflow** built (Phase 6). The only
+remaining step is operational — **run a real forward supervised period**.
+**Verdict: ELIGIBLE TO BEGIN supervised paper/shadow; NOT live-eligible.**
 
 ## Is the Binance futures crypto version viable?
 
@@ -72,26 +80,40 @@ genuinely two-sided, and a testnet path exists.
 | **Best overall** | **Long-only Trading 212** — real venue, beats the index risk-adjusted, lowest fundamental risk, closest to a paper period. |
 | **Safest** | **Long-only** — no leverage, no shorting, no liquidation; a long book in an ISA. |
 | **Most profitable (net)** | `long_only_xsec_momentum` on total return (+311%); crypto has a higher *ceiling* but extreme risk and a tiny sample. |
-| **Easiest to deploy** | **Long-only** — Trading 212 has an official Invest/ISA API; only the order path needs wiring. |
+| **Easiest to deploy** | **Long-only** — official Invest/ISA API; the DEMO order path is now wired. |
 | **Live eligible** | **None.** |
-| **Paper first** | **Long-only**, once the concentration gate is closed. |
+| **Paper first** | **Long-only** — eligible to BEGIN now (concentration gate closed). |
 
 ## Remaining blockers
 
-1. **Concentration** — long-only (26.1%) and futures both miss the month-≤25% gate; apply the Phase 1 smoothing mitigation and re-validate.
-2. **Supervised paper/shadow period** — not yet run (Phase 5 infra: shadow planners exist; a calendar-time period does not).
-3. **Survivorship bias** — `us_stocks_50` / `crypto_top_20` are today's survivors backtested into the past (Phase 3 not yet done).
-4. **Crisis-regime test** — no 2008/2020-style crash exercised for the long/futures books (Phase 4 not yet done).
-5. **Venue wiring** — T212 demo order path and Binance testnet keys are not wired (shadow planners only).
-6. **Margin/shorting broker** — none connected (Path C is the interface only), so the market-neutral book has no home.
+For the long-only product, the research/operational blockers are **closed**; the
+remaining items are operational or apply to the other paths:
+
+1. **Run the forward supervised period** — the long-only workflow exists and the
+   product is *eligible to begin*; a real 30–90 day FORWARD period has not yet
+   run (replay validates the pipeline only). Live stays blocked until it passes.
+2. **Survivorship — bounded, not eliminated** for long-only; the edge leans on
+   the top winners. Eliminating it needs point-in-time constituent data.
+3. **Crisis evidence is synthetic** — no real 2008/2020 tail in the sample.
+4. **Crypto futures** still fails concentration; ~0.84y sample (testnet only).
+5. **Margin/shorting broker** — none connected (Path C is the interface only), so
+   the market-neutral book still has no home.
 
 ## What should the operator do next?
 
-1. Apply the **EWMA-smoothing** concentration mitigation to `long_only_xsec_momentum` and re-run `long-only-readiness` — target 7/7.
-2. Resolve/bound **survivorship** (Phase 3) and run a **crisis** test (Phase 4) on the long-only book.
-3. Wire the **Trading 212 demo** order path and run a **supervised paper period** (30–90 days) with TCA.
-4. Keep the market-neutral flagship in **research only**; do not fund it. Treat Path C as the future home if a real margin broker is integrated via its official API.
-5. Treat crypto futures as a **separate, smaller-risk-budget testnet experiment** only after a longer sample is collected.
+1. **DONE this sprint:** EWMA smoothing closed the long-only concentration gate
+   (26.1% → 23.5%); survivorship bounded; crisis tested; T212 demo order path
+   wired; supervised-period workflow built. `statarb product-decision` now reports
+   long-only as **paper_candidate**.
+2. **Run a real forward supervised paper period:** `statarb supervised-paper-start
+   --product long_only_t212 --mode shadow` once per day for 30–90 days, then
+   `supervised-paper-final-report --min-days 30` (see `docs/long_only_t212_paper_plan.md`).
+3. (Optional) configure Trading 212 **demo** keys and run the period in
+   `demo_preview` / `demo_execute --confirm-demo` (see `docs/trading212_demo_execution.md`).
+4. Pursue **point-in-time constituent data** to upgrade survivorship to *eliminated*
+   before any live conversation. Keep the market-neutral flagship research-only.
+5. Treat crypto futures as a **separate testnet experiment** only after a longer
+   sample.
 
 ## What should NOT be traded?
 

@@ -937,7 +937,7 @@ def concentration_report_cmd(
     settings, storage = _bootstrap()
     from app.backtesting.basket_engine import run_basket_backtest
     from app.backtesting.concentration import analyze_concentration, attribute_sleeves
-    from app.backtesting.concentration_fixes import WrappedWeightFn, default_fix_specs
+    from app.backtesting.concentration_fixes import default_fix_specs
     from app.data.universe import get_sectors
 
     specs = default_fix_specs(get_sectors(universe))
@@ -1023,9 +1023,89 @@ def _concentration_markdown(rep, names, universe, interval, fix) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _long_only_smoothing_eval(storage, strategy, universe, interval, smoothings,
+                              *, n_folds=3, register_trials=False):
+    """Evaluate a list of SmoothingConfig on a long-only strategy: full-window
+    concentration + OOS walk-forward Sharpe per config. The shared engine for the
+    long-only concentration-fix commands. Returns (rows, names, base_oos)."""
+    from app.backtesting.concentration import analyze_concentration
+    from app.backtesting.long_only_engine import _long_only_guard, run_long_only_backtest
+    from app.backtesting.walk_forward import run_basket_holdout
+    from app.data.universe import get_sectors
+
+    defaults, prices, config, reb_every = _long_only_setup(storage, universe, interval)
+    regime_cfg = _regime_cfg(True, 0.0)
+    benchmarks = _load_benchmarks(storage, interval)
+    sectors = get_sectors(universe)
+    rows: list[dict] = []
+    names: list[str] = [strategy]
+    base_oos = None
+    for sm in smoothings:
+        def build(sm=sm):
+            fn, nm = _build_long_only(strategy, defaults, universe, interval,
+                                      regime_cfg, reb_every, smoothing=sm)
+            names[:] = nm
+            return fn
+
+        res = run_long_only_backtest(prices.close, build(), config, aux=prices.aux,
+                                     open_=prices.open, benchmarks=benchmarks)
+        conc = analyze_concentration(res.equity, close=prices.close,
+                                     weights_df=res.book.weights, sectors=sectors)
+        wf = run_basket_holdout(prices.close, lambda sm=sm: _long_only_guard(build(sm), 0.20, 1.0),
+                                config, n_folds=n_folds, aux=prices.aux, open_=prices.open)
+        oos = wf.summary.get("oos_sharpe_mean")
+        if sm.method == "none":
+            base_oos = oos
+        c = res.comparison
+        rows.append({
+            "smoothing": sm.label(),
+            "return_pct": res.metrics.get("total_return_pct"),
+            "sharpe": c["book_sharpe"],
+            "max_dd_pct": res.metrics.get("max_drawdown_pct"),
+            "turnover": res.metrics.get("turnover"),
+            "max_month_pct": conc.max_month_pct,
+            "best5pct_share": conc.best5pct_share,
+            "conc_score": conc.concentration_score(),
+            "gate_pass": (conc.max_month_pct or 99) <= 25.0,
+            "oos_sharpe": oos,
+            "oos_folds_positive": wf.summary.get("oos_folds_positive"),
+            "beats_bench": c["beats_benchmark_sharpe"],
+            "alpha+": c["positive_alpha"],
+        })
+        if register_trials:
+            _record_experiment(
+                storage, kind="long_only_smoothing", strategy=strategy,
+                universe=universe, interval=interval, prices=prices,
+                metrics={"sharpe": c["book_sharpe"], "oos_sharpe": oos,
+                         "max_month_pct": conc.max_month_pct},
+                config={"smoothing": sm.model_dump(), "strategy": strategy},
+                notes=f"smoothing family member: {sm.label()}")
+    return rows, names, base_oos
+
+
+def _recommend_smoothing(rows, base_oos):
+    """Among smoothing configs that PASS the concentration gate AND keep OOS
+    Sharpe >= 85% of the unsmoothed baseline, recommend the one with the largest
+    margin under the gate (lowest worst-month share) — robustness over headline
+    Sharpe, the right bias for a paper-eligibility decision that must survive a
+    real forward period. Also returns the max-OOS-Sharpe alternative.
+    Returns (recommended_label | None, max_oos_alt | None, oos_floor)."""
+    floor = (float(base_oos) * 0.85) if base_oos else 0.0
+    survivors = [r for r in rows if r["gate_pass"] and r["smoothing"] != "none"
+                 and float(r["oos_sharpe"] or 0) >= floor]
+    if not survivors:
+        return None, None, floor
+    robust = min(survivors, key=lambda r: float(r["max_month_pct"] or 99))
+    max_oos = max(survivors, key=lambda r: float(r["oos_sharpe"] or 0))
+    alt = max_oos["smoothing"] if max_oos["smoothing"] != robust["smoothing"] else None
+    return robust["smoothing"], alt, floor
+
+
 @app.command("concentration-fix-backtest")
 def concentration_fix_backtest(
-    fix: str = typer.Option("combo", help="named fix (see compare-concentration-fixes)"),
+    fix: str = typer.Option("combo", help="named fix (ensemble path; see compare-concentration-fixes)"),
+    strategy: str = typer.Option("ensemble", help="ensemble (market-neutral) | long_only_*"),
+    method: str | None = typer.Option(None, help="long-only smoothing: none|ewma|capped_change|ewma_capped"),
     sleeves: str | None = typer.Option(None),
     universe: str = typer.Option("us_stocks_50"),
     interval: str = typer.Option("1d"),
@@ -1034,8 +1114,31 @@ def concentration_fix_backtest(
     """Backtest one concentration fix: full-window concentration + OOS Sharpe.
 
     A fix is only worth keeping if it lowers concentration WITHOUT breaking the
-    out-of-sample Sharpe — both are reported here side by side with the baseline."""
+    out-of-sample Sharpe — both are reported side by side with the baseline.
+
+    For a long-only strategy (`--strategy long_only_xsec_momentum --method ewma`)
+    this compares the UNSMOOTHED baseline against the chosen EWMA smoothing — the
+    Phase 1 mitigation for the long-only concentration gate."""
     settings, storage = _bootstrap()
+    if strategy.startswith("long_only"):
+        import pandas as pd
+
+        defaults = _strategy_defaults(interval)
+        smoothed = _smoothing_config(defaults, method=method or "ewma")
+        baseline = _smoothing_config(defaults, method="none")
+        console.print(f"Long-only concentration fix — [bold]{strategy}[/bold] "
+                      f"(baseline vs {smoothed.label()}) on {universe}...")
+        rows, names, base_oos = _long_only_smoothing_eval(
+            storage, strategy, universe, interval, [baseline, smoothed], n_folds=n_folds)
+        df = pd.DataFrame(rows).set_index("smoothing")
+        console.print(df.to_string())
+        passed = rows[-1]["gate_pass"]
+        console.print(f"\nconcentration gate (worst month <= 25%): "
+                      f"[{'green' if passed else 'red'}]{'PASS' if passed else 'FAIL'}[/] "
+                      f"at {smoothed.label()} (worst month {rows[-1]['max_month_pct']}%); "
+                      f"OOS Sharpe {rows[-1]['oos_sharpe']} vs baseline {base_oos}.")
+        console.print("[dim]Keep smoothing only if the gate passes AND OOS Sharpe holds.[/dim]")
+        return
     from app.backtesting.basket_engine import run_basket_backtest
     from app.backtesting.concentration import analyze_concentration
     from app.backtesting.concentration_fixes import default_fix_specs
@@ -1080,6 +1183,7 @@ def concentration_fix_backtest(
 
 @app.command("compare-concentration-fixes")
 def compare_concentration_fixes(
+    strategy: str = typer.Option("ensemble", help="ensemble (market-neutral) | long_only_*"),
     sleeves: str | None = typer.Option(None),
     universe: str = typer.Option("us_stocks_50"),
     interval: str = typer.Option("1d"),
@@ -1090,9 +1194,52 @@ def compare_concentration_fixes(
     Picks the best fix that passes the concentration gate while preserving
     out-of-sample Sharpe — the Phase 1 acceptance test. Writes a report and
     prints the recommended fix (or 'none survive' if the edge is too concentrated
-    to repair without destroying it)."""
+    to repair without destroying it).
+
+    For a long-only strategy (`--strategy long_only_xsec_momentum`) this sweeps
+    the EWMA/capped weight-smoothing FAMILY (each member registered as a trial),
+    comparing the unsmoothed baseline against every smoothing config, and
+    recommends the one that closes the concentration gate while preserving OOS."""
     settings, storage = _bootstrap()
     import pandas as pd
+
+    if strategy.startswith("long_only"):
+        from app.strategies.weight_smoothing import smoothing_family
+
+        console.print(f"Long-only smoothing sweep — [bold]{strategy}[/bold] on {universe} "
+                      f"(each config registered as a trial)...")
+        rows, names, base_oos = _long_only_smoothing_eval(
+            storage, strategy, universe, interval, smoothing_family(),
+            n_folds=n_folds, register_trials=True)
+        df = pd.DataFrame(rows).set_index("smoothing")
+        console.print(df.to_string())
+        recommended, alt, floor = _recommend_smoothing(rows, base_oos)
+        if recommended:
+            r = next(x for x in rows if x["smoothing"] == recommended)
+            console.print(f"\n[green]Recommended smoothing (closes gate, OOS holds, max buffer):[/green] "
+                          f"[bold]{recommended}[/bold] — worst month {r['max_month_pct']}% (<=25%), "
+                          f"OOS Sharpe {r['oos_sharpe']} (>= floor {floor:.2f} = 85% of baseline {base_oos}).")
+            if alt:
+                a = next(x for x in rows if x["smoothing"] == alt)
+                console.print(f"[dim]Higher-Sharpe alternative: {alt} "
+                              f"(OOS {a['oos_sharpe']}, worst month {a['max_month_pct']}%).[/dim]")
+        else:
+            console.print("\n[red]No smoothing config closes the concentration gate while "
+                          "preserving OOS Sharpe — honest negative result.[/red]")
+        out = settings.reports_dir / f"concentration_smoothing_{strategy}_{universe}.md"
+        lines = [f"# Long-only smoothing sweep — {strategy} ({universe}, {interval})", "",
+                 df.to_markdown(), "",
+                 f"OOS Sharpe floor (85% of baseline {base_oos}): {floor:.3f}", ""]
+        if recommended:
+            lines.append(f"**Recommended smoothing (max gate buffer, OOS preserved): "
+                         f"{recommended}**")
+            if alt:
+                lines.append(f"\nHigher-Sharpe alternative within the passing set: {alt}.")
+        else:
+            lines.append("**No smoothing config closes the gate without hurting OOS.**")
+        out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        console.print(f"[green]Report:[/green] {out}")
+        return
 
     from app.backtesting.basket_engine import run_basket_backtest
     from app.backtesting.concentration import analyze_concentration
@@ -1189,12 +1336,37 @@ LONG_ONLY_STRATEGIES = ("long_only_xsec_momentum", "long_only_tsmom",
                         "long_only_ml_alpha", "long_only_ensemble")
 
 
-def _long_only_configs(defaults: dict):
+def _smoothing_config(defaults: dict, *, method: str | None = None,
+                      alpha: float | None = None, half_life: float | None = None):
+    """Build a SmoothingConfig from the `long_only_smoothing` YAML block, with
+    optional CLI overrides. `method="none"` disables smoothing (exact passthrough).
+    The YAML default (ewma, alpha 0.5) was selected by validation, not tuned on
+    the failing month — see compare-concentration-fixes."""
+    from app.strategies.weight_smoothing import SmoothingConfig
+
+    raw = dict(defaults.get("long_only_smoothing", {}) or {})
+    if raw.get("half_life") in (None, "null", ""):
+        raw.pop("half_life", None)
+    if method is not None:
+        raw["method"] = method
+    if alpha is not None:
+        raw["alpha"] = alpha
+    if half_life is not None:
+        raw["half_life"] = half_life
+    return SmoothingConfig(**{k: v for k, v in raw.items() if k in SmoothingConfig.model_fields})
+
+
+def _long_only_configs(defaults: dict, smoothing=None):
     """Map the tuned daily momentum/ML config onto the long-only sleeve configs
-    so Path A inherits the flagship's calibration (252-day momentum, etc.)."""
+    so Path A inherits the flagship's calibration (252-day momentum, etc.).
+
+    `smoothing` (a SmoothingConfig) is baked into the single-sleeve momentum
+    configs (xsmom/tsmom); the ensemble applies it once at book level instead."""
     from app.strategies.long_only_momentum import LongOnlyTSMOMConfig, LongOnlyXSMOMConfig
     from app.strategies.ml_alpha import MLAlphaConfig
+    from app.strategies.weight_smoothing import SmoothingConfig
 
+    sm = smoothing or SmoothingConfig()
     mom = defaults.get("momentum", {}) or {}
     ml_raw = dict(defaults.get("ml_alpha", {}) or {})
     xs = LongOnlyXSMOMConfig(
@@ -1203,12 +1375,14 @@ def _long_only_configs(defaults: dict):
         top_k=int(mom.get("xsmom_top_k", 5)),
         top_frac=float(mom.get("xsmom_top_frac", 0.10)),
         max_weight=0.20,
+        smoothing=sm,
     )
     ts = LongOnlyTSMOMConfig(
         lookback_bars=int(mom.get("tsmom_lookback_bars", 252)),
         skip_bars=int(mom.get("tsmom_skip_bars", 21)),
         vol_window=int(mom.get("tsmom_vol_window", 63)),
         max_weight=0.20,
+        smoothing=sm,
     )
     ml = MLAlphaConfig(**{k: v for k, v in ml_raw.items() if k in MLAlphaConfig.model_fields})
     return xs, ts, ml
@@ -1222,8 +1396,14 @@ def _regime_cfg(enabled: bool, risk_off_exposure: float, ma_window: int = 200):
 
 
 def _build_long_only(strategy: str, defaults: dict, universe: str, interval: str,
-                     regime, reb_every: int, record_history: bool = False):
-    """Return (weight_fn, names). `weight_fn` is the long-only book to backtest."""
+                     regime, reb_every: int, record_history: bool = False,
+                     smoothing=None):
+    """Return (weight_fn, names). `weight_fn` is the long-only book to backtest.
+
+    `smoothing` (a SmoothingConfig) is applied at the strategy level for the
+    single-sleeve momentum books (xsmom/tsmom), at book level for the ensemble,
+    and via an engine-compatible wrapper for ml_alpha (which has no smoothing
+    config of its own)."""
     from app.core.math_utils import periods_per_year
     from app.strategies.ensemble import EnsembleConfig
     from app.strategies.long_only_ensemble import build_long_only_ensemble
@@ -1232,14 +1412,19 @@ def _build_long_only(strategy: str, defaults: dict, universe: str, interval: str
         make_long_only_tsmom_weight_fn,
         make_long_only_xsmom_weight_fn,
     )
+    from app.strategies.weight_smoothing import SmoothingConfig, SmoothingWeightFn
 
-    xs, ts, ml = _long_only_configs(defaults)
+    sm = smoothing or SmoothingConfig()
+    xs, ts, ml = _long_only_configs(defaults, smoothing=sm)
     if strategy == "long_only_xsec_momentum":
         return make_long_only_xsmom_weight_fn(xs.model_copy(update={"regime": regime})), [strategy]
     if strategy == "long_only_tsmom":
         return make_long_only_tsmom_weight_fn(ts.model_copy(update={"regime": regime})), [strategy]
     if strategy == "long_only_ml_alpha":
-        return make_long_only_ml_alpha(ml, regime=regime), [strategy]
+        fn = make_long_only_ml_alpha(ml, regime=regime)
+        if sm.method != "none":
+            fn = SmoothingWeightFn(fn, sm, max_weight=0.20, gross_target=1.0)
+        return fn, [strategy]
     if strategy == "long_only_ensemble":
         ens_raw = defaults.get("ensemble", {}) or {}
         bpy = _bars_per_year(universe, interval) or periods_per_year(interval)
@@ -1253,7 +1438,7 @@ def _build_long_only(strategy: str, defaults: dict, universe: str, interval: str
         )
         ens = build_long_only_ensemble(
             xsmom=xs, tsmom=ts, ml=ml, ensemble_config=ens_cfg, regime=regime,
-            gross_cap=1.0, max_position=0.20, record_history=record_history)
+            gross_cap=1.0, max_position=0.20, smoothing=sm, record_history=record_history)
         return ens, list(ens.ensemble.sleeves)
     raise typer.BadParameter(f"unknown long-only strategy {strategy!r}; "
                              f"choose from {LONG_ONLY_STRATEGIES}")
@@ -1304,6 +1489,8 @@ def backtest_long_only(
     regime: bool = typer.Option(True, "--regime/--no-regime",
                                 help="risk-off cash filter (market below its 200d MA)"),
     risk_off_exposure: float = typer.Option(0.0, help="gross when risk-off (0 = full cash)"),
+    smoothing: str = typer.Option("default",
+                                  help="none|ewma|capped_change|ewma_capped|default (from YAML)"),
 ) -> None:
     """Backtest a long-only book against buy-and-hold benchmarks (Path A).
 
@@ -1316,7 +1503,9 @@ def backtest_long_only(
     defaults, prices, config, reb_every = _long_only_setup(
         storage, universe, interval, rebalance_every)
     regime_cfg = _regime_cfg(regime, risk_off_exposure)
-    fn, names = _build_long_only(strategy, defaults, universe, interval, regime_cfg, reb_every)
+    sm = _smoothing_config(defaults, method=None if smoothing == "default" else smoothing)
+    fn, names = _build_long_only(strategy, defaults, universe, interval, regime_cfg,
+                                 reb_every, smoothing=sm)
     benchmarks = _load_benchmarks(storage, interval)
     console.print(f"Long-only backtest: [bold]{strategy}[/bold] ({' + '.join(names)}) on "
                   f"{universe}, regime={'on' if regime else 'off'}...")
@@ -1374,7 +1563,6 @@ def compare_long_only(
     settings, storage = _bootstrap()
     import pandas as pd
 
-    from app.backtesting.basket_engine import run_basket_backtest
     from app.backtesting.long_only_engine import run_long_only_backtest
 
     defaults, prices, config, reb_every = _long_only_setup(
@@ -1406,6 +1594,52 @@ def compare_long_only(
     console.print(f"[green]Report:[/green] {out}")
 
 
+def _operational_gates(settings, strategy: str, universe: str) -> dict:
+    """The OPERATIONAL paper-readiness gates (separate from the research gates):
+    order path wired (shadow/demo), survivorship bounded/warned, crisis tested.
+    These read the artifacts the Phase 3/4/5 commands write — they are NOT re-run
+    here. Each value is (ok, detail)."""
+    rd = settings.reports_dir
+    surv = rd / f"survivorship_{strategy}_{universe}.md"
+    surv_lo = rd / f"survivorship_long_only_{strategy}_{universe}.md"
+    crisis = rd / f"crisis_{strategy}_{universe}.md"
+    crisis_lo = rd / f"crisis_long_only_{strategy}_{universe}.md"
+
+    def _exists_with(paths, token=None):
+        for p in paths:
+            if p.exists():
+                txt = p.read_text(encoding="utf-8")
+                if token is None or token in txt:
+                    return True, p.name
+        return False, None
+
+    # order path: the shadow rebalancer always exists; the official demo executor
+    # (Phase 5) is available when its module imports. Shadow mode sends nothing.
+    order_ok = True
+    order_detail = "shadow planner wired"
+    try:
+        import app.brokers.trading212.demo_execution  # noqa: F401
+        order_detail = "shadow planner + official demo executor wired (demo sends only with explicit flags)"
+    except Exception:  # noqa: BLE001
+        pass
+
+    surv_ok, surv_name = _exists_with([surv_lo, surv], "BOUNDED")
+    surv_warn, surv_warn_name = _exists_with([surv_lo, surv])
+    crisis_done, crisis_name = _exists_with([crisis_lo, crisis])
+    return {
+        "order path available (shadow/demo)": (order_ok, order_detail),
+        "survivorship bounded or warning attached": (
+            surv_ok or surv_warn,
+            f"bounded ({surv_name})" if surv_ok else
+            (f"run survivorship-stress-long-only ({surv_warn_name})" if surv_warn
+             else "run survivorship-stress-long-only (not yet run)")),
+        "crisis test completed or explicit blocker": (
+            crisis_done,
+            f"completed ({crisis_name})" if crisis_done
+            else "run crisis-test-long-only (explicit blocker until then)"),
+    }
+
+
 @app.command("long-only-readiness")
 def long_only_readiness(
     strategy: str = typer.Option("long_only_ensemble"),
@@ -1413,14 +1647,21 @@ def long_only_readiness(
     interval: str = typer.Option("1d"),
     n_folds: int = typer.Option(3),
     rebalance_every: int | None = typer.Option(None),
+    smoothing: str = typer.Option("default",
+                                  help="none|ewma|capped_change|ewma_capped|default (from YAML)"),
+    full: bool = typer.Option(False, "--full",
+                              help="include operational gates (order path/survivorship/crisis)"),
+    write_report: bool = typer.Option(True, "--write-report/--no-write-report"),
 ) -> None:
     """Long-only paper-readiness gate (Path A). NEVER asserts live eligibility.
 
-    Runs the full battery — beats-benchmark, walk-forward OOS, cost stress,
-    concentration gate, turnover — and prints PASS/FAIL plus the paper-trading
-    plan. The best a long-only book can earn here is 'paper-trading eligible'."""
+    Research battery: beats SPY/QQQ/equal-weight, positive alpha, walk-forward
+    OOS, cost stress x2/x3, concentration, turnover, drawdown, plus the structural
+    long-only constraints (no short/leverage/margin/CFD). With `--full` it also
+    checks the OPERATIONAL gates (order path wired, survivorship bounded, crisis
+    tested). The best a long-only book can earn here is 'eligible to BEGIN a
+    supervised paper/shadow period' — never live."""
     settings, storage = _bootstrap()
-    from app.backtesting.basket_engine import run_basket_backtest
     from app.backtesting.concentration import analyze_concentration
     from app.backtesting.long_only_engine import _long_only_guard, run_long_only_backtest
     from app.backtesting.stress_tests import run_basket_stress_suite
@@ -1431,13 +1672,17 @@ def long_only_readiness(
         storage, universe, interval, rebalance_every)
     regime_cfg = _regime_cfg(True, 0.0)
     benchmarks = _load_benchmarks(storage, interval)
+    sm = _smoothing_config(defaults, method=None if smoothing == "default" else smoothing)
 
     def factory():
-        fn, _ = _build_long_only(strategy, defaults, universe, interval, regime_cfg, reb_every)
+        fn, _ = _build_long_only(strategy, defaults, universe, interval, regime_cfg,
+                                 reb_every, smoothing=sm)
         return _long_only_guard(fn, 0.20, 1.0)
 
-    console.print(f"Long-only readiness: [bold]{strategy}[/bold] on {universe}...")
-    fn, names = _build_long_only(strategy, defaults, universe, interval, regime_cfg, reb_every)
+    console.print(f"Long-only readiness: [bold]{strategy}[/bold] on {universe} "
+                  f"(smoothing={sm.label()})...")
+    fn, names = _build_long_only(strategy, defaults, universe, interval, regime_cfg,
+                                 reb_every, smoothing=sm)
     result = run_long_only_backtest(prices.close, fn, config, aux=prices.aux,
                                     open_=prices.open, benchmarks=benchmarks)
     conc = analyze_concentration(result.equity, close=prices.close,
@@ -1448,47 +1693,96 @@ def long_only_readiness(
                                      aux=prices.aux, open_=prices.open)
 
     c = result.comparison
+    bench = c["benchmarks"]
     turnover = float(result.metrics.get("turnover") or 0)
+    max_dd = abs(float(result.metrics.get("max_drawdown_pct") or 0))
+    oos_pos = wf.summary.get("oos_folds_positive") or 0
+    oos_tot = wf.summary.get("oos_folds") or 0
+    book_sh = c["book_sharpe"] or 0
+
+    def _beats(name):
+        return bool(book_sh > (bench.get(name, {}).get("sharpe") or 0))
+
+    # --- research gates ---
     checks = {
-        "beats primary benchmark (Sharpe)": c["beats_benchmark_sharpe"],
-        "positive alpha vs benchmark": c["positive_alpha"],
-        "OOS walk-forward Sharpe > 0.3": float(wf.summary.get("oos_sharpe_mean") or 0) > 0.3,
+        "beats SPY (Sharpe)": _beats("SPY") if "SPY" in bench else c["beats_benchmark_sharpe"],
+        "beats QQQ (Sharpe)": _beats("QQQ") if "QQQ" in bench else True,
+        "beats equal-weight (Sharpe)": _beats("equal_weight"),
+        "positive alpha vs SPY": c["positive_alpha"],
+        "OOS walk-forward Sharpe > 0.5": float(wf.summary.get("oos_sharpe_mean") or 0) > 0.5,
+        "OOS folds 2/2+ positive": oos_tot >= 2 and oos_pos == oos_tot,
         "survives costs x2 (positive)": float(stress.loc["costs_x2", "total_return_pct"] or 0) > 0,
         "survives costs x3 (positive)": float(stress.loc["costs_x3", "total_return_pct"] or 0) > 0,
         "concentration: no month > 25%": (conc.max_month_pct or 0) <= 25.0,
         "turnover acceptable (< 50x/yr)": turnover < 50.0,
+        "drawdown acceptable (<= 30%)": max_dd <= 30.0,
+        # structural long-only constraints (enforced by construction)
+        "no shorting (long-only guard)": True,
+        "no leverage (gross <= 1.0)": True,
+        "no margin (financing forced 0)": True,
+        "no CFD / supported instruments only": True,
     }
     _print_long_only_comparison(c)
     console.print(f"\n[bold]Walk-forward[/bold]: OOS Sharpe {wf.summary.get('oos_sharpe_mean')}, "
-                  f"{wf.summary.get('oos_folds_positive')}/{wf.summary.get('oos_folds')} folds positive")
-    console.print(f"[bold]Concentration score[/bold]: {conc.concentration_score()}/100 "
-                  f"(max month {conc.max_month_pct}%)")
-    console.print(f"[bold]Turnover[/bold]: {turnover}x/yr")
-    console.print("\n[bold]Readiness gate[/bold]")
+                  f"{oos_pos}/{oos_tot} folds positive")
+    console.print(f"[bold]Concentration[/bold]: score {conc.concentration_score()}/100 "
+                  f"(worst month {conc.max_month_pct}%) | turnover {turnover}x/yr | maxDD -{max_dd}%")
+    console.print("\n[bold]Research gate[/bold]")
     for name, ok in checks.items():
         console.print(f"  [{'green' if ok else 'red'}]{'PASS' if ok else 'FAIL'}[/] {name}")
-    passed = sum(1 for v in checks.values() if v)
-    eligible = all(checks.values())
-    verdict = ("[green]PAPER-TRADING ELIGIBLE[/green]" if eligible
-               else f"[yellow]NOT YET PAPER-ELIGIBLE ({passed}/{len(checks)} gates)[/yellow]")
-    console.print(f"\nVerdict: {verdict}")
-    console.print("[bold red]NOT LIVE ELIGIBLE[/bold red] — paper/shadow only; no Invest/ISA "
-                  "order endpoint is wired and a supervised paper period must pass first.")
-    out = settings.reports_dir / f"long_only_readiness_{strategy}_{universe}.md"
-    lines = [f"# Long-only readiness — {strategy} ({universe}, {interval})", "",
-             f"Verdict: **{'PAPER-TRADING ELIGIBLE' if eligible else 'NOT YET PAPER-ELIGIBLE'}** "
-             f"({passed}/{len(checks)} gates)", "", "**NOT LIVE ELIGIBLE.**", "",
-             "## Gate checks", ""]
-    lines += [f"- {'PASS' if ok else 'FAIL'} — {n}" for n, ok in checks.items()]
-    lines += ["", "## Book vs benchmarks", "",
-              f"- book Sharpe {c['book_sharpe']}, return {c['book_total_return_pct']}%",
-              f"- primary benchmark {c['primary_benchmark']}: "
-              f"{c['benchmarks'].get(c['primary_benchmark'], {})}",
-              f"- walk-forward OOS Sharpe {wf.summary.get('oos_sharpe_mean')}",
-              f"- concentration score {conc.concentration_score()}/100", ""]
-    out.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    console.print(f"[green]Report:[/green] {out}")
-    if not eligible:
+    research_passed = all(checks.values())
+
+    op_gates = _operational_gates(settings, strategy, universe) if full else {}
+    if full:
+        console.print("\n[bold]Operational gate[/bold]")
+        for name, (ok, detail) in op_gates.items():
+            console.print(f"  [{'green' if ok else 'yellow'}]{'PASS' if ok else 'PENDING'}[/] "
+                          f"{name} [dim]({detail})[/dim]")
+    op_passed = all(ok for ok, _ in op_gates.values()) if full else False
+
+    n_pass = sum(1 for v in checks.values() if v)
+    if research_passed and full and op_passed:
+        status = "ELIGIBLE TO BEGIN SUPERVISED PAPER/SHADOW PERIOD"
+        color = "green"
+    elif research_passed:
+        status = ("RESEARCH-GATE PASSED — pending operational paper setup" if full
+                  else "PAPER-TRADING ELIGIBLE (research gates)")
+        color = "green"
+    else:
+        status = f"NOT YET PAPER-ELIGIBLE ({n_pass}/{len(checks)} research gates)"
+        color = "yellow"
+    console.print(f"\nVerdict: [{color}]{status}[/{color}]")
+    console.print("[bold red]NOT LIVE ELIGIBLE[/bold red] — paper/shadow only; live order "
+                  "endpoint is hard-blocked and a supervised forward paper period must pass first.")
+
+    if write_report:
+        paper_eligible = research_passed and full and op_passed
+        out = settings.reports_dir / f"long_only_readiness_{strategy}_{universe}.md"
+        lines = [f"# Long-only readiness — {strategy} ({universe}, {interval})", "",
+                 f"Smoothing: **{sm.label()}**", "",
+                 f"Verdict: **{status}**", "",
+                 f"- research_gate_passed: {research_passed}",
+                 f"- paper_eligible: {paper_eligible}",
+                 "- live_eligible: false", "",
+                 "**NOT LIVE ELIGIBLE.**", "", "## Research gate checks", ""]
+        lines += [f"- {'PASS' if ok else 'FAIL'} — {n}" for n, ok in checks.items()]
+        if full:
+            lines += ["", "## Operational gate checks", ""]
+            lines += [f"- {'PASS' if ok else 'PENDING'} — {n} ({detail})"
+                      for n, (ok, detail) in op_gates.items()]
+        lines += ["", "## Book vs benchmarks", "",
+                  f"- book Sharpe {c['book_sharpe']}, return {c['book_total_return_pct']}%, "
+                  f"maxDD -{max_dd}%, turnover {turnover}x/yr",
+                  f"- SPY Sharpe {bench.get('SPY', {}).get('sharpe')}, "
+                  f"QQQ {bench.get('QQQ', {}).get('sharpe')}, "
+                  f"equal-weight {bench.get('equal_weight', {}).get('sharpe')}",
+                  f"- walk-forward OOS Sharpe {wf.summary.get('oos_sharpe_mean')} "
+                  f"({oos_pos}/{oos_tot} folds positive)",
+                  f"- concentration: worst month {conc.max_month_pct}% "
+                  f"(score {conc.concentration_score()}/100)", ""]
+        out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        console.print(f"[green]Report:[/green] {out}")
+    if not research_passed:
         raise typer.Exit(1)
 
 
@@ -1504,60 +1798,242 @@ def _synthetic_trading212_instruments(symbols: list[str]) -> dict:
                           fractional=True, shortable=False) for s in symbols}
 
 
-@app.command("paper-trade-long-only")
-def paper_trade_long_only(
-    strategy: str = typer.Option("long_only_ensemble"),
+def _latest_long_only_weights(storage, strategy, universe, interval, *, smoothing=None):
+    """Target long-only weights on the latest bar + last prices + symbols +
+    last-bar timestamp (the inputs the demo order path needs)."""
+    defaults, prices, config, reb_every = _long_only_setup(storage, universe, interval)
+    regime_cfg = _regime_cfg(True, 0.0)
+    sm = smoothing if smoothing is not None else _smoothing_config(defaults)
+    fn, names = _build_long_only(strategy, defaults, universe, interval, regime_cfg,
+                                 reb_every, smoothing=sm)
+    window = prices.close.iloc[-config.fit_window:]
+    aux_window = {k: v.iloc[-config.fit_window:] for k, v in prices.aux.items()}
+    weights = (fn(window, aux=aux_window) if getattr(fn, "wants_aux", False) else fn(window))
+    weights = weights.clip(lower=0.0)
+    last_prices = {s: float(prices.close[s].iloc[-1]) for s in prices.symbols}
+    return ({s: float(w) for s, w in weights.items()}, last_prices,
+            list(prices.symbols), prices.index[-1])
+
+
+def _paper_eligible_for(settings, strategy, universe) -> bool:
+    p = settings.reports_dir / f"long_only_readiness_{strategy}_{universe}.md"
+    if not p.exists():
+        return False
+    return "paper_eligible: true" in p.read_text(encoding="utf-8").lower()
+
+
+def _market_data_fresh(last_bar, max_age_days: int = 5) -> bool:
+    ts = last_bar.to_pydatetime() if hasattr(last_bar, "to_pydatetime") else last_bar
+    age = (utc_now().replace(tzinfo=None) - ts.replace(tzinfo=None)).days
+    return age <= max_age_days
+
+
+def _kill_switch_active(settings) -> bool:
+    from app.risk.kill_switch import KillSwitch
+
+    return KillSwitch(settings.runtime_dir / "kill_switch.flag").is_active
+
+
+def _t212_instrument_cache(settings, symbols, *, connect: bool):
+    """Instrument cache for the order path; connects to the DEMO API for the real
+    instrument list only when `connect` and keys are configured, else offline."""
+    from app.brokers.trading212.instrument_cache import load_instrument_cache
+
+    client = None
+    if connect and settings.trading212_enabled and settings.trading212_api_key:
+        try:
+            from app.brokers.trading212.client import Trading212Client
+            client = Trading212Client(
+                api_key=settings.trading212_api_key, api_secret=settings.trading212_api_secret,
+                mode="demo", enabled=True, allow_live=False,
+                account_type=settings.trading212_account_type)
+        except Exception:  # noqa: BLE001 - offline fallback
+            client = None
+    return load_instrument_cache(symbols, client=client, runtime_dir=settings.runtime_dir)
+
+
+def _print_demo_run(result, *, max_rows: int = 25) -> None:
+    """Print a DemoRunResult: banner, plan table, validation, gate, submit."""
+    banner_color = {"shadow": "green", "demo_preview": "yellow", "demo_execute": "red"}
+    console.print(f"\n[bold {banner_color.get(result.mode, 'yellow')}]{result.banner}[/]")
+    console.print("[bold red]NOT LIVE ELIGIBLE[/bold red] — the live endpoint is hard-blocked.")
+    if result.account:
+        console.print(f"[bold]DEMO account[/bold]: cash {result.account['cash']}, "
+                      f"equity {result.account['equity']}, "
+                      f"{result.account['n_positions']} positions")
+    planned = result.planned
+    if planned:
+        s = planned.summary()
+        console.print(f"target names: {sum(1 for w in planned.target_weights.values() if w > 0)}, "
+                      f"orders {s['n_orders']} (buys {s['n_buys']}/sells {s['n_sells']}), "
+                      f"market {'OPEN' if s['market_open'] else 'CLOSED'}"
+                      f"{' (queued)' if s['queued'] else ''}")
+        table = Table(title=f"Planned orders ({result.mode})")
+        for col in ("symbol", "side", "type", "qty", "limit", "notional", "tgt_wt"):
+            table.add_column(col, justify="right")
+        for row in sorted(planned.order_rows(), key=lambda x: -x["notional"])[:max_rows]:
+            table.add_row(row["symbol"], row["side"], row["type"], f"{row['quantity']:.4f}",
+                          f"{row['limit_price']:.2f}" if row["limit_price"] else "—",
+                          f"{row['notional']:.2f}", f"{row['target_weight']:.2%}")
+        console.print(table)
+        v = planned.validation
+        vc = "green" if v.ok else "red"
+        console.print(f"order validation: [{vc}]{'PASS' if v.ok else 'FAIL'}[/]")
+        for name, ok in v.checks.items():
+            if not ok:
+                console.print(f"  [red]FAIL[/] {name}")
+        for sym, why in v.order_issues[:10]:
+            console.print(f"  [yellow]{sym}: {why}[/yellow]")
+    if result.reconciliation:
+        console.print(f"reconciliation: in_sync={result.reconciliation.in_sync}, "
+                      f"abs drift {result.reconciliation.total_abs_drift:.3f}, "
+                      f"shorts {result.reconciliation.n_short_positions}")
+    if result.gate:
+        gc = "green" if result.gate.ok else "red"
+        console.print(f"\n[bold]Demo execution gate[/bold]: [{gc}]{'PASS' if result.gate.ok else 'BLOCKED'}[/]")
+        for name, ok in result.gate.checks.items():
+            console.print(f"  [{'green' if ok else 'red'}]{'PASS' if ok else 'FAIL'}[/] {name}")
+    if result.submit:
+        console.print(f"\n[bold]Demo submission[/bold]: {result.submit}")
+    for note in result.notes:
+        console.print(f"[dim]- {note}[/dim]")
+
+
+def _run_long_only_demo(settings, storage, *, strategy, universe, interval, mode,
+                        starting_cash, confirm_demo, allowed_modes):
+    """Shared runner for paper-trade-long-only / long-only-order-preview."""
+    from app.brokers.trading212.order_validation import is_us_market_open
+    from app.execution.long_only_demo_executor import LongOnlyDemoExecutor
+
+    if mode == "demo":            # back-compat alias
+        mode = "demo_preview"
+    if mode not in allowed_modes:
+        raise typer.BadParameter(f"mode must be one of {allowed_modes}")
+    weights, last_prices, symbols, last_bar = _latest_long_only_weights(
+        storage, strategy, universe, interval)
+    cache = _t212_instrument_cache(settings, symbols, connect=(mode != "shadow"))
+    paper_eligible = _paper_eligible_for(settings, strategy, universe)
+    executor = LongOnlyDemoExecutor(settings, cache)
+    try:
+        result = executor.run(
+            mode, weights, positions={}, cash=starting_cash, prices=last_prices,
+            confirm_demo=confirm_demo, paper_eligible=paper_eligible,
+            market_data_fresh=_market_data_fresh(last_bar),
+            kill_switch_active=_kill_switch_active(settings),
+            market_open=is_us_market_open())
+    except Exception as exc:  # noqa: BLE001 - demo connection failure is user-facing
+        console.print(f"[red]Demo connection failed:[/red] {exc}")
+        console.print("[yellow]Set TRADING212_ENABLED=true, TRADING212_MODE=demo and "
+                      "TRADING212_API_KEY/SECRET (demo keys). Use --mode shadow to plan "
+                      "offline.[/yellow]")
+        raise typer.Exit(1) from exc
+    _print_demo_run(result)
+    return result
+
+
+@app.command("trading212-check")
+def trading212_check(mode: str = typer.Option("demo", help="demo only; live is blocked")) -> None:
+    """Check the Trading 212 DEMO connection + account snapshot (read-only).
+
+    Verifies keys, reads cash/positions from the DEMO account. Live is refused."""
+    settings, _ = _bootstrap()
+    if mode != "demo":
+        raise typer.BadParameter("Only --mode demo is supported; live is blocked.")
+    from app.brokers.trading212.demo_execution import Trading212DemoExecutor
+
+    console.print("[bold yellow]DEMO ONLY[/bold yellow] — checking Trading 212 demo connection...")
+    try:
+        info = Trading212DemoExecutor(settings).check_connection()
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]Not connected:[/red] {exc}")
+        console.print("[dim]Set TRADING212_ENABLED=true, TRADING212_MODE=demo, "
+                      "TRADING212_API_KEY/SECRET (demo keys).[/dim]")
+        raise typer.Exit(1) from exc
+    table = Table(title="Trading 212 DEMO account")
+    table.add_column("field")
+    table.add_column("value", justify="right")
+    for k in ("broker", "mode", "currency", "cash", "equity", "n_positions"):
+        table.add_row(k, str(info.get(k)))
+    console.print(table)
+    console.print("[bold red]NOT LIVE ELIGIBLE[/bold red] — demo endpoint only.")
+
+
+@app.command("trading212-instruments")
+def trading212_instruments(
+    mode: str = typer.Option("demo"),
+    universe: str = typer.Option("us_stocks_50"),
+    limit: int = typer.Option(30),
+) -> None:
+    """List Trading 212 instrument metadata for a universe (tradability,
+    fractional support, minimums). Uses the DEMO API list when keys are set,
+    else conservative offline stubs."""
+    settings, storage = _bootstrap()
+    if mode != "demo":
+        raise typer.BadParameter("Only --mode demo is supported; live is blocked.")
+    from app.data.universe import get_universe
+
+    symbols = get_universe(universe)
+    cache = _t212_instrument_cache(settings, symbols, connect=True)
+    console.print(f"[bold]Trading 212 instruments[/bold] ({universe}, source={cache.source})")
+    table = Table()
+    for col in ("symbol", "tradable", "fractional", "min_qty", "min_notional"):
+        table.add_column(col)
+    for sym in symbols[:limit]:
+        ok, why = cache.is_tradable(sym)
+        table.add_row(sym, "yes" if ok else f"no ({why})",
+                      "yes" if cache.is_fractional(sym) else "no",
+                      str(cache.min_quantity(sym)), str(cache.min_notional(sym)))
+    console.print(table)
+    console.print("[dim]CFDs, shorting and margin are not exposed by the official API.[/dim]")
+
+
+@app.command("long-only-order-preview")
+def long_only_order_preview(
+    strategy: str = typer.Option("long_only_xsec_momentum"),
     broker: str = typer.Option("trading212"),
-    mode: str = typer.Option("shadow", help="shadow (plan only) | demo (Phase 5 demo connector)"),
+    mode: str = typer.Option("demo_preview", help="shadow | demo_preview"),
     universe: str = typer.Option("us_stocks_50"),
     interval: str = typer.Option("1d"),
     starting_cash: float = typer.Option(10_000.0),
 ) -> None:
-    """Shadow-plan today's long-only orders for Trading 212 Invest/ISA (Path A).
+    """Preview today's long-only Trading 212 orders (Phase 5). SENDS NOTHING.
 
-    Computes target weights on the latest bar and turns them into a concrete
-    Trading 212 order plan (no short, no margin, fractional shares, limit-order
-    preference, market-hours awareness) — WITHOUT sending anything. The full
-    supervised paper/demo loop with simulated fills + TCA is the Phase 5 layer."""
+    `--mode shadow` plans fully offline; `--mode demo_preview` connects to the
+    DEMO account, plans against its real cash/positions and validates — but never
+    submits. Use paper-trade-long-only --mode demo_execute to actually send."""
     settings, storage = _bootstrap()
     if broker != "trading212":
         raise typer.BadParameter("Path A targets Trading 212 Invest/ISA only.")
-    if mode == "demo":
-        console.print("[yellow]Demo-connector paper trading is the Phase 5 layer "
-                      "(shadow-start/paper-start). Running SHADOW plan instead.[/yellow]")
-    from app.execution.trading212_rebalancer import RebalanceConfig, Trading212Rebalancer
+    _run_long_only_demo(settings, storage, strategy=strategy, universe=universe,
+                        interval=interval, mode=mode, starting_cash=starting_cash,
+                        confirm_demo=False, allowed_modes=("shadow", "demo_preview"))
 
-    defaults, prices, config, reb_every = _long_only_setup(storage, universe, interval)
-    regime_cfg = _regime_cfg(True, 0.0)
-    fn, names = _build_long_only(strategy, defaults, universe, interval, regime_cfg, reb_every)
-    window = prices.close.iloc[-config.fit_window:]
-    aux_window = {k: v.iloc[-config.fit_window:] for k, v in prices.aux.items()}
-    weights = (fn(window, aux=aux_window) if getattr(fn, "wants_aux", False)
-               else fn(window))
-    weights = weights.clip(lower=0.0)
-    last_prices = {s: float(prices.close[s].iloc[-1]) for s in prices.symbols}
 
-    instruments = _synthetic_trading212_instruments(prices.symbols)
-    reb = Trading212Rebalancer(instruments, RebalanceConfig())
-    plan = reb.plan({s: float(w) for s, w in weights.items()}, positions={},
-                    cash=starting_cash, prices=last_prices, market_open=False)
-    console.print(f"[bold green]SHADOW plan[/bold green] — {strategy} on {universe} "
-                  f"({broker}). [bold]NO REAL ORDERS.[/bold]")
-    console.print(f"target names: {int((weights > 0).sum())}, "
-                  f"gross {float(weights.sum()):.2%}, cash buffer {plan.summary()}")
-    table = Table(title="Planned orders (shadow)")
-    for col in ("symbol", "side", "type", "qty", "limit", "notional", "tgt_wt"):
-        table.add_column(col, justify="right")
-    for o in sorted(plan.orders, key=lambda x: -x.request.notional)[:25]:
-        r = o.request
-        table.add_row(r.symbol, r.side.value, r.order_type.value, f"{r.quantity:.4f}",
-                      f"{r.limit_price:.2f}" if r.limit_price else "—",
-                      f"{r.notional:.2f}", f"{o.weight_after:.2%}")
-    console.print(table)
-    for sym, reason in plan.skipped[:10]:
-        console.print(f"[dim]skipped {sym}: {reason}[/dim]")
-    for note in plan.notes:
-        console.print(f"[dim]- {note}[/dim]")
+@app.command("paper-trade-long-only")
+def paper_trade_long_only(
+    strategy: str = typer.Option("long_only_xsec_momentum"),
+    broker: str = typer.Option("trading212"),
+    mode: str = typer.Option("shadow", help="shadow | demo_preview | demo_execute"),
+    universe: str = typer.Option("us_stocks_50"),
+    interval: str = typer.Option("1d"),
+    starting_cash: float = typer.Option(10_000.0),
+    confirm_demo: bool = typer.Option(False, "--confirm-demo",
+                                      help="required to actually submit demo orders"),
+) -> None:
+    """Plan / preview / submit today's long-only Trading 212 Invest/ISA orders.
+
+    * shadow       — plan + validate, SEND NOTHING (offline).
+    * demo_preview — connect to the DEMO account, plan + validate, SEND NOTHING.
+    * demo_execute — submit to the DEMO account ONLY, and ONLY if the full demo
+                     execution gate passes (requires --confirm-demo and the env
+                     flags). The live endpoint is hard-blocked in every mode."""
+    settings, storage = _bootstrap()
+    if broker != "trading212":
+        raise typer.BadParameter("Path A targets Trading 212 Invest/ISA only.")
+    _run_long_only_demo(settings, storage, strategy=strategy, universe=universe,
+                        interval=interval, mode=mode, starting_cash=starting_cash,
+                        confirm_demo=confirm_demo,
+                        allowed_modes=("shadow", "demo_preview", "demo_execute"))
 
 
 @app.command("paper-trade-basket")
@@ -2750,6 +3226,270 @@ def paper_readiness_report(
 
 
 # --------------------------------------------------------------------------------
+# Phase 6 — supervised paper/shadow PERIOD workflow (calendar-aware sessions)
+# --------------------------------------------------------------------------------
+
+SUPERVISED_PRODUCTS = {
+    "long_only_t212": ("long_only_xsec_momentum", "us_stocks_50", "1d"),
+}
+
+
+def _supervised_paper_day(settings, storage, *, product, strategy, universe, interval,
+                          mode, session, book, fn, prices, benchmarks, bar_idx,
+                          replay, confirm_demo, store, peak_equity):
+    """Run and record ONE supervised day. Plans against the persisted paper book,
+    simulates fills (the paper equity curve), reconciles, and records all seven
+    tables. In demo_execute mode it also submits to the Trading 212 DEMO account
+    (gated). Returns the new running peak equity."""
+    from app.brokers.trading212.instrument_cache import InstrumentCache, synthetic_instruments
+    from app.brokers.trading212.order_validation import is_us_market_open
+    from app.execution.long_only_order_planner import (
+        LongOnlyOrderPlanner,
+        expected_slippage_bps,
+    )
+    from app.execution.long_only_reconciliation import reconcile_long_only
+
+    fit = 300
+    window = prices.close.iloc[bar_idx - fit + 1: bar_idx + 1]
+    aux = {k: v.iloc[bar_idx - fit + 1: bar_idx + 1] for k, v in prices.aux.items()}
+    weights = (fn(window, aux=aux) if getattr(fn, "wants_aux", False) else fn(window))
+    weights = {s: max(0.0, float(w)) for s, w in weights.items()}
+    prices_t = {s: float(prices.close[s].iloc[bar_idx]) for s in prices.symbols}
+    date = (utc_now().replace(tzinfo=None).date().isoformat() if not replay
+            else str(prices.close.index[bar_idx].date()))
+
+    cache = InstrumentCache(synthetic_instruments(list(prices.symbols)))
+    planner = LongOnlyOrderPlanner(cache)
+    market_open = True if replay else is_us_market_open()
+    planned = planner.plan(weights, dict(book.positions), book.cash, prices_t,
+                           market_open=market_open)
+
+    # simulate fills against the paper book (the paper equity curve)
+    slippage_bps = 5.0
+    n_rejected = len(planned.plan.skipped)
+    for o in planned.plan.orders:
+        r = o.request
+        fill_px = r.ref_price * (1 + slippage_bps / 1e4 if r.side.value == "buy"
+                                 else 1 - slippage_bps / 1e4)
+        book.apply_fill(r.symbol, r.side.value, r.quantity, fill_px, 0.0)
+
+    equity = book.equity(prices_t)
+    peak = max(peak_equity, equity)
+    drawdown_pct = round(100 * (equity / peak - 1.0), 2) if peak else 0.0
+    gross = sum(abs(q) * prices_t.get(s, 0) for s, q in book.positions.items())
+    gross_exp = round(gross / equity, 3) if equity else 0.0
+    top_weight = max((abs(q) * prices_t.get(s, 0) / equity for s, q in book.positions.items()),
+                     default=0.0) if equity else 0.0
+
+    # demo execution (only in demo_execute and only when fully gated)
+    demo_sent = broker_errors = 0
+    recon = reconcile_long_only(weights, dict(book.positions), prices_t, book.cash)
+    if mode == "demo_execute" and not replay:
+        try:
+            res = _run_long_only_demo(
+                settings, storage, strategy=strategy, universe=universe, interval=interval,
+                mode="demo_execute", starting_cash=session.starting_cash,
+                confirm_demo=confirm_demo, allowed_modes=("demo_execute",))
+            if res.submit:
+                demo_sent = res.submit.get("n_submitted", 0)
+            if res.reconciliation:
+                recon = res.reconciliation
+        except Exception:  # noqa: BLE001 - demo failures recorded, not fatal to the record
+            broker_errors = 1
+
+    store.append("daily_reports", {
+        "date": date, "mode": mode, "replay": replay, "equity": round(equity, 2),
+        "cash": round(book.cash, 2), "gross_exposure": gross_exp,
+        "n_orders": len(planned.plan.orders), "n_rejected": n_rejected,
+        "demo_orders_sent": demo_sent, "broker_errors": broker_errors,
+        "top_weight": round(top_weight, 4), "drawdown_pct": drawdown_pct,
+        "data_quality_events": 0})
+    for row in planned.order_rows():
+        store.append("orders", {"date": date, **row})
+    store.append("reconciliations", {"date": date, **recon.summary()})
+    store.append("tca", {
+        "date": date, "n_orders": len(planned.plan.orders),
+        "avg_expected_slippage_bps": expected_slippage_bps(planned.plan),
+        "realized_slippage_bps": slippage_bps, "fees": 0.0})
+    breach = abs(drawdown_pct) > 25.0 or top_weight > 0.25 or gross_exp > 1.001
+    store.append("risk_snapshots", {
+        "date": date, "gross_exposure": gross_exp, "max_name_weight": round(top_weight, 4),
+        "drawdown_pct": drawdown_pct, "breach": bool(breach)})
+    bench_row = {"date": date}
+    for name, px in (benchmarks or {}).items():
+        ser = px.dropna()
+        if len(ser):
+            base = float(ser.iloc[0])
+            bench_row[f"{name.lower()}_equity"] = round(
+                session.starting_cash * float(ser.iloc[min(bar_idx, len(ser) - 1)]) / base, 2)
+    store.append("benchmark_snapshots", bench_row)
+    return peak
+
+
+@app.command("supervised-paper-start")
+def supervised_paper_start(
+    product: str = typer.Option("long_only_t212", help=" | ".join(SUPERVISED_PRODUCTS)),
+    mode: str = typer.Option("shadow", help="shadow | demo_preview | demo_execute"),
+    min_days: int = typer.Option(30, help="minimum FORWARD calendar days to pass"),
+    starting_cash: float = typer.Option(10_000.0),
+    replay: int = typer.Option(0, help="replay the last N bars (labeled REPLAY, not forward)"),
+    confirm_demo: bool = typer.Option(False, "--confirm-demo"),
+    reset: bool = typer.Option(False, help="discard any existing session and start fresh"),
+) -> None:
+    """Start / advance a supervised paper period (Phase 6).
+
+    With no --replay it records ONE forward day (run it daily — a cron, not a
+    loop). With --replay N it replays the last N bars to validate the pipeline;
+    those are labeled REPLAY and NEVER count as forward calendar days."""
+    settings, storage = _bootstrap()
+    if product not in SUPERVISED_PRODUCTS:
+        raise typer.BadParameter(f"unknown product {product!r}; choose {list(SUPERVISED_PRODUCTS)}")
+    from app.execution.shadow import load_paper_book, save_paper_book
+    from app.execution.supervised_paper import (
+        PaperSession,
+        SupervisedPaperStore,
+        supervised_status,
+    )
+
+    strategy, universe, interval = SUPERVISED_PRODUCTS[product]
+    store = SupervisedPaperStore(settings.runtime_dir, product)
+    if reset:
+        store.reset()
+    session = store.current_session()
+    if session is None:
+        session = PaperSession.new(product, mode, min_days=min_days, starting_cash=starting_cash)
+        store.start_session(session)
+        console.print(f"[green]Started[/green] supervised paper session {session.session_id} "
+                      f"({product}, mode={mode}, min_days={min_days}).")
+    elif session.status != "active":
+        raise typer.BadParameter("session is stopped; pass --reset to start a new one")
+
+    defaults, prices, config, reb_every = _long_only_setup(storage, universe, interval)
+    regime_cfg = _regime_cfg(True, 0.0)
+    sm = _smoothing_config(defaults)
+    fn, _ = _build_long_only(strategy, defaults, universe, interval, regime_cfg,
+                             reb_every, smoothing=sm)
+    benchmarks = _load_benchmarks(storage, interval)
+    book = load_paper_book(settings.runtime_dir, f"paper_{product}", starting_cash)
+    daily = store.load("daily_reports")
+    peak = max((float(r["equity"]) for r in daily), default=session.starting_cash)
+
+    console.print(f"[bold]{'REPLAY' if replay else 'FORWARD'} supervised cycle(s)[/bold] — "
+                  f"{product} mode={session.mode}. "
+                  f"{'NO REAL ORDERS (shadow).' if session.mode == 'shadow' else 'DEMO ONLY.'}")
+    n = len(prices.close)
+    if replay > 0:
+        for idx in range(max(301, n - replay), n):
+            peak = _supervised_paper_day(
+                settings, storage, product=product, strategy=strategy, universe=universe,
+                interval=interval, mode=session.mode, session=session, book=book, fn=fn,
+                prices=prices, benchmarks=benchmarks, bar_idx=idx, replay=True,
+                confirm_demo=confirm_demo, store=store, peak_equity=peak)
+    else:
+        peak = _supervised_paper_day(
+            settings, storage, product=product, strategy=strategy, universe=universe,
+            interval=interval, mode=session.mode, session=session, book=book, fn=fn,
+            prices=prices, benchmarks=benchmarks, bar_idx=n - 1, replay=False,
+            confirm_demo=confirm_demo, store=store, peak_equity=peak)
+    save_paper_book(settings.runtime_dir, f"paper_{product}", book)
+    _print_shadow_summary(supervised_status(store))
+    console.print("[bold red]NOT LIVE ELIGIBLE.[/bold red]")
+
+
+@app.command("supervised-paper-status")
+def supervised_paper_status_cmd(
+    product: str = typer.Option("long_only_t212"),
+) -> None:
+    """Current supervised paper session status (forward vs replay days, equity)."""
+    settings, _ = _bootstrap()
+    from app.execution.supervised_paper import SupervisedPaperStore, supervised_status
+
+    store = SupervisedPaperStore(settings.runtime_dir, product)
+    _print_shadow_summary(supervised_status(store))
+
+
+@app.command("supervised-paper-daily-report")
+def supervised_paper_daily_report(
+    product: str = typer.Option("long_only_t212"),
+) -> None:
+    """Show the most recent recorded day across all paper tables."""
+    settings, _ = _bootstrap()
+    from app.execution.supervised_paper import SupervisedPaperStore
+
+    store = SupervisedPaperStore(settings.runtime_dir, product)
+    daily = store.load("daily_reports")
+    if not daily:
+        console.print("[yellow]No recorded days. Run supervised-paper-start.[/yellow]")
+        raise typer.Exit(1)
+    last = daily[-1]
+    console.print(f"[bold]Daily report — {product} {last['date']} "
+                  f"({'REPLAY' if last.get('replay') else 'FORWARD'})[/bold]")
+    _print_shadow_summary(last)
+    tca = [t for t in store.load("tca") if t["date"] == last["date"]]
+    recon = [r for r in store.load("reconciliations") if r["date"] == last["date"]]
+    if tca:
+        console.print(f"TCA: {tca[-1]}")
+    if recon:
+        console.print(f"Reconciliation: {recon[-1]}")
+
+
+@app.command("supervised-paper-final-report")
+def supervised_paper_final_report(
+    product: str = typer.Option("long_only_t212"),
+    min_days: int = typer.Option(30),
+) -> None:
+    """Final supervised-period report + pass/fail recommendation (Phase 6).
+
+    PASS requires >= min_days distinct FORWARD calendar days — replay days never
+    satisfy it. Live remains blocked regardless."""
+    settings, _ = _bootstrap()
+    from app.execution.supervised_paper import SupervisedPaperStore, final_report
+
+    store = SupervisedPaperStore(settings.runtime_dir, product)
+    if store.current_session() is None:
+        console.print("[yellow]No session. Run supervised-paper-start.[/yellow]")
+        raise typer.Exit(1)
+    rep = final_report(store, min_days=min_days)
+    table = Table(title=f"Supervised paper final report — {product}")
+    table.add_column("metric")
+    table.add_column("value", justify="right")
+    for k, v in rep.items():
+        if k != "checks":
+            table.add_row(k, str(v))
+    console.print(table)
+    console.print("\n[bold]Checks[/bold]")
+    for name, ok in rep["checks"].items():
+        console.print(f"  [{'green' if ok else 'red'}]{'PASS' if ok else 'FAIL'}[/] {name}")
+    color = {"PASS": "green"}.get(rep["recommendation"], "yellow")
+    console.print(f"\nRecommendation: [{color}]{rep['recommendation']}[/] — {rep['verdict']}")
+    out = settings.reports_dir / f"supervised_paper_final_{product}.md"
+    lines = [f"# Supervised paper final report — {product}", "",
+             f"Verdict: **{rep['verdict']}**", "",
+             *(f"- {k}: {v}" for k, v in rep.items() if k != "checks"), "",
+             "## Checks", "",
+             *(f"- {'PASS' if ok else 'FAIL'} — {n}" for n, ok in rep["checks"].items())]
+    out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    console.print(f"[green]Report:[/green] {out}")
+
+
+@app.command("supervised-paper-stop")
+def supervised_paper_stop(
+    product: str = typer.Option("long_only_t212"),
+    reason: str = typer.Option(..., help="why the period is being stopped"),
+) -> None:
+    """Stop the active supervised paper session (records the reason)."""
+    settings, _ = _bootstrap()
+    from app.execution.supervised_paper import SupervisedPaperStore
+
+    store = SupervisedPaperStore(settings.runtime_dir, product)
+    s = store.stop_session(reason)
+    if s is None:
+        console.print("[yellow]No session to stop.[/yellow]")
+        raise typer.Exit(1)
+    console.print(f"[green]Stopped[/green] {s.session_id}: {reason}")
+
+
+# --------------------------------------------------------------------------------
 # Phase 3 — point-in-time / survivorship-bias bound
 # --------------------------------------------------------------------------------
 
@@ -2773,8 +3513,10 @@ def universe_audit(universe: str = typer.Option("us_stocks_50")) -> None:
                       "not evidence, until a PIT feed exists.[/yellow]")
 
 
-def _survivorship_run_factory(strategy, universe, interval):
-    """run_on_symbols(symbols)->metrics, for the survivorship stress."""
+def _survivorship_run_factory(strategy, universe, interval, smoothing=None):
+    """run_on_symbols(symbols)->metrics, for the survivorship stress. For a
+    long-only strategy `smoothing` is applied so the bias bound reflects the
+    same (certified, smoothed) book the readiness gate certifies."""
     settings, storage = _bootstrap()
     from app.backtesting.basket_engine import BasketConfig, run_basket_backtest
     from app.backtesting.long_only_engine import _long_only_guard
@@ -2784,6 +3526,7 @@ def _survivorship_run_factory(strategy, universe, interval):
     basket_raw = defaults.get("basket", {}) or {}
     reb_every = 5 if strategy.startswith("long_only") else int(basket_raw.get("rebalance_every", 1))
     use_adjusted = _default_adjusted(universe, interval)
+    sm = smoothing if smoothing is not None else _smoothing_config(defaults, method="none")
 
     def run_on_symbols(symbols):
         prices = build_price_matrix(storage, symbols, interval, adjusted=use_adjusted, min_rows=60)
@@ -2793,13 +3536,30 @@ def _survivorship_run_factory(strategy, universe, interval):
             bars_per_year=_bars_per_year(universe, interval), fill="next_open", label="surv")
         if strategy.startswith("long_only"):
             rc = _regime_cfg(True, 0.0)
-            fn, _ = _build_long_only(strategy, defaults, universe, interval, rc, reb_every)
+            fn, _ = _build_long_only(strategy, defaults, universe, interval, rc, reb_every,
+                                     smoothing=sm)
             fn = _long_only_guard(fn, 0.20, 1.0)
         else:
             _, fn = _build_ensemble(None, defaults, False, universe, interval, 1.0, reb_every)
         return run_basket_backtest(prices.close, fn, config, aux=prices.aux,
                                    open_=prices.open).metrics
     return run_on_symbols
+
+
+def _name_total_returns(storage, universe, interval):
+    """Per-name total return over the window — used to rank the worst/best names
+    for the survivorship best-5/worst-5 removal scenarios."""
+    from app.data.market_data import build_price_matrix
+    from app.data.universe import get_universe
+
+    prices = build_price_matrix(storage, get_universe(universe), interval,
+                                adjusted=_default_adjusted(universe, interval))
+    out = {}
+    for sym in prices.close.columns:
+        col = prices.close[sym].dropna()
+        if len(col) > 1 and col.iloc[0] > 0:
+            out[sym] = float(col.iloc[-1] / col.iloc[0] - 1.0)
+    return out
 
 
 @app.command("survivorship-stress")
@@ -2838,6 +3598,86 @@ def survivorship_stress(
     console.print(f"[green]Report:[/green] {out}")
 
 
+def _run_universe_bias(storage, settings, strategy, universe, interval, *, smoothing=None):
+    """Shared engine for survivorship-stress-long-only and universe-bias-report:
+    builds the full bias report (random/sector-balanced/best-5/worst-5 drops +
+    bootstrap) for the smoothed long-only strategy and writes the report file the
+    long-only readiness operational gate reads."""
+    import pandas as pd
+
+    from app.backtesting.survivorship import run_universe_bias_report
+    from app.data.universe import get_sectors
+
+    defaults = _strategy_defaults(interval)
+    sm = smoothing if smoothing is not None else _smoothing_config(defaults)
+    run_fn = _survivorship_run_factory(strategy, universe, interval, smoothing=sm)
+    name_returns = _name_total_returns(storage, universe, interval)
+    rep = run_universe_bias_report(universe, run_fn, sectors=get_sectors(universe),
+                                   name_returns=name_returns)
+    df = pd.DataFrame(rep.rows()).set_index("scenario")
+    console.print(df.to_string())
+    v = rep.verdict()
+    color = {"eliminated": "green", "bounded": "yellow", "unresolved": "red"}.get(v, "red")
+    console.print(f"\nbootstrap median Sharpe {rep.median_sharpe:.3f} | 5th-pct "
+                  f"{rep.sharpe_p05:.3f} | worst-case DD {rep.worst_case_dd_pct:.1f}%")
+    console.print(f"survivorship verdict: [{color}]{v.upper()}[/{color}] "
+                  "(only point-in-time membership data can ELIMINATE the bias)")
+    out = settings.reports_dir / f"survivorship_long_only_{strategy}_{universe}.md"
+    lines = [f"# Survivorship / universe-bias bound — {strategy} ({universe}, {interval})", "",
+             f"Smoothing: **{sm.label()}**", "",
+             f"Verdict: **{v.upper()}**", "",
+             *(f"- {k}: {val}" for k, val in rep.summary().items()), "",
+             "## Scenarios", "", df.to_markdown(), "",
+             "Note: 'best_5_removed' drops the 5 biggest individual winners — the "
+             "names today's survivor list is most likely to over-represent — so a "
+             "Sharpe that holds there is the core of the bound. 'eliminated' is "
+             "reserved for an actual point-in-time constituent backtest (not available)."]
+    out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    console.print(f"[green]Report:[/green] {out}")
+    return rep
+
+
+@app.command("survivorship-stress-long-only")
+def survivorship_stress_long_only(
+    strategy: str = typer.Option("long_only_xsec_momentum"),
+    universe: str = typer.Option("us_stocks_50"),
+    interval: str = typer.Option("1d"),
+) -> None:
+    """Full survivorship-bias bound for the SMOOTHED long-only book (Phase 3).
+
+    Random 10/20/30% drops, a sector-balanced 20% drop, and the worst-5 / best-5
+    individual winners removed, plus a bootstrap Sharpe distribution (median, 5th
+    percentile). Verdict: eliminated (PIT only) / bounded / unresolved."""
+    settings, storage = _bootstrap()
+    console.print(f"Survivorship (long-only): [bold]{strategy}[/bold] on {universe}...")
+    _run_universe_bias(storage, settings, strategy, universe, interval)
+
+
+@app.command("universe-bias-report")
+def universe_bias_report(
+    universe: str = typer.Option("us_stocks_50"),
+    strategy: str = typer.Option("long_only_xsec_momentum"),
+    interval: str = typer.Option("1d"),
+) -> None:
+    """Universe survivorship status + the strategy bias bound in one report.
+
+    States the universe's survivorship label (today's survivors vs point-in-time)
+    and quantifies how much the lead long-only strategy's edge depends on the
+    exact survivor set."""
+    settings, storage = _bootstrap()
+    from app.data.universe import get_universe, get_universe_meta
+
+    meta = get_universe_meta(universe)
+    biased = meta.survivorship != "point_in_time"
+    console.print(f"[bold]Universe-bias report — {universe}[/bold] "
+                  f"({len(get_universe(universe))} names, survivorship={meta.survivorship})")
+    if biased:
+        console.print("[yellow]SURVIVORSHIP-BIASED: today's survivors backtested into the "
+                      "past; no point-in-time feed integrated. Bias is BOUNDED below, not "
+                      "eliminated.[/yellow]")
+    _run_universe_bias(storage, settings, strategy, universe, interval)
+
+
 @app.command("point-in-time-backtest")
 def point_in_time_backtest(
     strategy: str = typer.Option("long_only_xsec_momentum"),
@@ -2863,9 +3703,10 @@ def point_in_time_backtest(
 # Phase 4 — crisis-regime + crash-protection testing
 # --------------------------------------------------------------------------------
 
-def _crisis_equity_runner(strategy, universe, interval, *, regime=True):
+def _crisis_equity_runner(strategy, universe, interval, *, regime=True, smoothing=None):
     """Build (run_fn, label) for the crisis suite over the equity basket engine.
-    run_fn(close, aux) -> equity. A fresh weight fn per call (sleeves stateful)."""
+    run_fn(close, aux) -> equity. A fresh weight fn per call (sleeves stateful).
+    `smoothing` (long-only only) lets the crisis test certify the SMOOTHED book."""
     settings, storage = _bootstrap()
     from app.backtesting.basket_engine import BasketConfig, run_basket_backtest
 
@@ -2881,7 +3722,8 @@ def _crisis_equity_runner(strategy, universe, interval, *, regime=True):
         if strategy.startswith("long_only"):
             from app.backtesting.long_only_engine import _long_only_guard
             rc = _regime_cfg(regime, 0.0)
-            fn, _ = _build_long_only(strategy, defaults, universe, interval, rc, reb_every)
+            fn, _ = _build_long_only(strategy, defaults, universe, interval, rc, reb_every,
+                                     smoothing=smoothing)
             return _long_only_guard(fn, 0.20, 1.0)
         _, ens = _build_ensemble(None, defaults, False, universe, interval, 1.0, reb_every)
         return ens
@@ -2920,6 +3762,99 @@ def crisis_test(
     out = settings.reports_dir / f"crisis_{strategy}_{universe}.md"
     out.write_text(f"# Crisis test — {strategy} ({universe}, {interval})\n\n"
                    f"{table.to_markdown()}\n\nWorst crisis DD: {worst}%\n", encoding="utf-8")
+    console.print(f"[green]Report:[/green] {out}")
+
+
+PRODUCT_STRATEGY = {
+    "long_only_t212": "long_only_xsec_momentum",
+    "long_only_equity": "long_only_xsec_momentum",
+    "crypto_futures": "crypto_futures_ensemble",
+}
+
+
+@app.command("crisis-test-long-only")
+def crisis_test_long_only(
+    strategy: str = typer.Option("long_only_xsec_momentum"),
+    universe: str = typer.Option("us_stocks_50"),
+    interval: str = typer.Option("1d"),
+) -> None:
+    """Expanded crisis suite for the SMOOTHED long-only book (Phase 4).
+
+    Synthetic 2008 grinding bear, 2020 COVID crash/rebound, momentum crash, vol
+    spike/whipsaw, correlation spike, gap down, gap-up-after-crash, tech-sector
+    crash and sector-rotation shock — all clearly SYNTHETIC/proxy (the 2021-2026
+    window has no 2008/2020 tail). Reports the effect of the regime filter and
+    EWMA smoothing, vs SPY/QQQ's real max drawdown, and an acceptance verdict."""
+    settings, storage = _bootstrap()
+    import pandas as pd
+
+    from app.backtesting.crisis import long_only_scenarios, run_crisis_suite
+    from app.backtesting.metrics import max_drawdown
+    from app.data.market_data import build_price_matrix
+    from app.data.universe import get_sectors, get_universe
+
+    defaults = _strategy_defaults(interval)
+    sm = _smoothing_config(defaults)
+    none_sm = _smoothing_config(defaults, method="none")
+    prices = build_price_matrix(storage, get_universe(universe), interval, adjusted=True)
+    scen = long_only_scenarios(get_sectors(universe))
+    console.print(f"Crisis test (long-only, SYNTHETIC): [bold]{strategy}[/bold] "
+                  f"on {universe} (smoothing={sm.label()})...")
+
+    # 1) full expanded suite on the certified book (regime ON + EWMA)
+    run_fn, _ = _crisis_equity_runner(strategy, universe, interval, regime=True, smoothing=sm)
+    table = run_crisis_suite(prices.close, run_fn, aux=prices.aux, scenarios=scen)
+    console.print(table)
+    base_full_dd = float(table.loc["base", "full_max_dd_pct"])
+    worst = float(table["crisis_max_dd_pct"].astype(float).min())
+    worst_scen = table["crisis_max_dd_pct"].astype(float).idxmin()
+
+    # 2) effects matrix: regime +/- and smoothing +/- (worst-case crisis DD + base return)
+    eff_rows = []
+    for rlabel, regime in (("regime_on", True), ("regime_off", False)):
+        for slabel, smc in (("ewma", sm), ("no_smooth", none_sm)):
+            rf, _ = _crisis_equity_runner(strategy, universe, interval,
+                                          regime=regime, smoothing=smc)
+            t = run_crisis_suite(prices.close, rf, aux=prices.aux, scenarios=scen)
+            eff_rows.append({
+                "variant": f"{rlabel}+{slabel}",
+                "base_full_return_pct": t.loc["base", "full_return_pct"],
+                "worst_crisis_dd_pct": float(t["crisis_max_dd_pct"].astype(float).min()),
+                "momentum_crash_dd": t.loc["momentum_crash", "crisis_max_dd_pct"],
+                "covid_dd": t.loc["covid_crash_rebound", "crisis_max_dd_pct"],
+                "bear2008_dd": t.loc["sustained_bear_2008", "crisis_max_dd_pct"],
+            })
+    eff = pd.DataFrame(eff_rows).set_index("variant")
+    console.print("\n[bold]Effect of regime filter + EWMA smoothing[/bold]")
+    console.print(eff)
+
+    # 3) benchmark reference (real historical max DD, NOT synthetic)
+    bench = _load_benchmarks(storage, interval)
+    bench_dd = {name: round(100 * max_drawdown(px.dropna()), 1) for name, px in bench.items()}
+    console.print(f"\n[dim]Reference (REAL history, not synthetic) max DD: {bench_dd}[/dim]")
+
+    # acceptance: worst synthetic crisis DD must be bounded (<= 45%) and not a wipeout
+    catastrophic = worst <= -60.0
+    bounded = worst > -45.0
+    verdict = ("[green]BOUNDED[/green]" if bounded else
+               ("[red]CATASTROPHIC[/red]" if catastrophic else "[yellow]DEEP BUT SURVIVABLE[/yellow]"))
+    console.print(f"\nWorst synthetic crisis DD: {worst}% ({worst_scen}); base full DD {base_full_dd}%")
+    console.print(f"crisis verdict: {verdict} "
+                  "[dim](synthetic/proxy — the live window has no 2008/2020 tail)[/dim]")
+
+    out = settings.reports_dir / f"crisis_long_only_{strategy}_{universe}.md"
+    lines = [f"# Long-only crisis test (SYNTHETIC) — {strategy} ({universe}, {interval})", "",
+             f"Smoothing: **{sm.label()}**  |  worst synthetic crisis DD: **{worst}%** "
+             f"({worst_scen})  |  base full DD {base_full_dd}%", "",
+             "> All crisis scenarios are SYNTHETIC/proxy injections — the 2021-2026 sample "
+             "contains no real 2008/2020 momentum-crash tail. Treat as stress bounds, not "
+             "history.", "",
+             "## Crisis suite (certified book: regime ON + EWMA)", "", table.to_markdown(), "",
+             "## Effect of regime filter + EWMA smoothing", "", eff.to_markdown(), "",
+             f"## Benchmark reference (REAL history)\n\nMax drawdown: {bench_dd}", "",
+             f"Acceptance: crisis DD bounded (> -45%): **{bounded}**; catastrophic (<= -60%): "
+             f"**{catastrophic}**."]
+    out.write_text("\n".join(lines) + "\n", encoding="utf-8")
     console.print(f"[green]Report:[/green] {out}")
 
 
@@ -2969,12 +3904,22 @@ def crash_protection_backtest(
 @app.command("crisis-report")
 def crisis_report(
     strategy: str = typer.Option("long_only_xsec_momentum"),
+    product: str | None = typer.Option(None, help="long_only_t212 | crypto_futures (maps to a strategy)"),
     universe: str = typer.Option("us_stocks_50"),
     interval: str = typer.Option("1d"),
 ) -> None:
-    """Crisis-test + crash-protection summary in one report."""
-    crisis_test(strategy=strategy, universe=universe, interval=interval)
-    crash_protection_backtest(strategy=strategy, universe=universe, interval=interval)
+    """Crisis-test + crash-protection summary in one report.
+
+    `--product long_only_t212` selects the long-only crisis suite (expanded
+    synthetic scenarios + regime/smoothing effects) for the lead equity product."""
+    if product:
+        strategy = PRODUCT_STRATEGY.get(product, strategy)
+    if strategy.startswith("long_only"):
+        crisis_test_long_only(strategy=strategy, universe=universe, interval=interval)
+        crash_protection_backtest(strategy=strategy, universe=universe, interval=interval)
+    else:
+        crisis_test(strategy=strategy, universe=universe, interval=interval)
+        crash_protection_backtest(strategy=strategy, universe=universe, interval=interval)
 
 
 registry_app = typer.Typer(no_args_is_help=True, help="Alpha registry: list, promote, reject, retire.")

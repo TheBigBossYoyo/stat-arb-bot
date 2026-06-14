@@ -24,6 +24,8 @@ venv/
 logs/*.log
 logs/*.jsonl
 runtime/kill_switch.flag
+runtime/shadow/
+runtime/paper/
 reports/*.md
 reports/*.html
 data_store/*.parquet

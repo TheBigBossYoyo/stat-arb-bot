@@ -24,15 +24,22 @@ today):
 
 ## Current standings (`statarb product-decision`)
 
-- **long-only equity (Trading 212):** lead candidate, **6/7** readiness gates —
-  fails concentration. NOT YET paper-eligible.
+- **long-only equity (Trading 212):** lead candidate. **UPDATE (2026-06-14):**
+  EWMA smoothing closed the concentration gate (worst month 26.1% → 23.5%); all
+  research gates + operational gates pass. **ELIGIBLE TO BEGIN a supervised
+  paper/shadow period** (`paper_candidate`). The DEMO order path is wired
+  (demo-only). **Still NOT live-eligible** — no forward paper period has run,
+  survivorship is bounded not eliminated, crisis evidence is synthetic.
 - **crypto futures (Binance testnet):** **5/6** — fails concentration; LIVE
   BLOCKED unconditionally; ~0.84y sample.
 - **market-neutral equity:** DO NOT TRADE — no venue + fails deflated Sharpe.
 
-## The path to the first paper period
+## The path to the first paper period — DONE; now run it
 
-Close the long-only concentration gate (Phase 1 smoothing), resolve survivorship
-(Phase 3), run a crisis test (Phase 4), wire the Trading 212 demo order path, then
-run the supervised paper period (Phase 5). Only after that does any live
-conversation begin — and only on an official venue.
+Phases 1 (smoothing), 3 (survivorship bound), 4 (crisis), 5 (T212 demo order
+path) and 6 (supervised-period workflow) are complete. The remaining step is
+operational, not code: **actually run** a 30–90 day forward supervised period
+(`statarb supervised-paper-start --product long_only_t212 --mode shadow`, daily —
+see `docs/long_only_t212_paper_plan.md`). Only after a passed FORWARD period, and
+with point-in-time survivorship data + governance sign-off, does any live
+conversation begin — and only on an official venue. Live is hard-blocked today.

@@ -119,6 +119,23 @@ walk_forward:
   test_bars: 1000
 
 # ---------------------------------------------------------------------------
+# Long-only (Trading 212 Invest/ISA) target-weight smoothing — Phase 1.
+# The unsmoothed long_only_xsec_momentum book fails ONLY the concentration gate
+# (worst calendar month 26.1% of PnL vs a 25% limit). EWMA-blending the target
+# weights across rebalances spreads PnL across more bars and closes that gate.
+# The default below (ewma, alpha 0.5) was SELECTED BY VALIDATION, not tuned on
+# the failing month: across the smoothing family (compare-concentration-fixes
+# --strategy long_only_xsec_momentum) it gives worst-month 23.5% (PASS, robust
+# 1.5pp buffer), OOS Sharpe 1.65 (2/2 folds, vs 1.71 unsmoothed), lower turnover
+# (30x vs 42x) and a slightly BETTER max drawdown. Set method: none to disable.
+# ---------------------------------------------------------------------------
+long_only_smoothing:
+  method: ewma              # none | ewma | capped_change | ewma_capped
+  alpha: 0.5                # EWMA blend on the new target (lower = smoother)
+  half_life: null           # rebalances; overrides alpha when set
+  max_weight_change: 0.05   # per-name per-rebalance cap (capped_* methods)
+
+# ---------------------------------------------------------------------------
 # Daily-bar profile (stocks / FX research data, e.g. universe us_stocks_50).
 # Merged over the sections above when --interval 1d: the base values are
 # tuned in 15m bars and would be wrong by ~96x on daily data, and the 15bps

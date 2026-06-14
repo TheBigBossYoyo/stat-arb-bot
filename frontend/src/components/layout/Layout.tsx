@@ -21,6 +21,19 @@ const NAV = [
   { to: "/settings", label: "Settings", icon: "⚙" },
 ];
 
+const PRODUCT_NAV = [
+  { to: "/product-decision", label: "Product Decision", icon: "◆" },
+  { to: "/tradability", label: "Tradability", icon: "▦" },
+  { to: "/blockers", label: "Blockers", icon: "⚑" },
+  { to: "/live-readiness", label: "Live Readiness", icon: "⛔" },
+  { to: "/concentration", label: "Concentration", icon: "▤" },
+  { to: "/deflated-sharpe", label: "Deflated Sharpe", icon: "∑" },
+  { to: "/crisis-lab", label: "Crisis Lab", icon: "☇" },
+  { to: "/paper-setup", label: "T212 Paper Setup", icon: "▷" },
+  { to: "/order-preview", label: "Order Preview", icon: "⇧" },
+  { to: "/paper-monitor", label: "Paper Monitor", icon: "◷" },
+];
+
 export default function Layout({ children }: { children: ReactNode }) {
   const { data: polled } = useQuery({
     queryKey: ["status"],
@@ -46,6 +59,23 @@ export default function Layout({ children }: { children: ReactNode }) {
               key={item.to}
               to={item.to}
               end={item.to === "/"}
+              className={({ isActive }) =>
+                `flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition ${
+                  isActive ? "bg-zinc-800 text-zinc-100" : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200"
+                }`
+              }
+            >
+              <span className="w-4 text-center text-zinc-500">{item.icon}</span>
+              {item.label}
+            </NavLink>
+          ))}
+          <div className="px-3 pb-1 pt-3 text-[10px] uppercase tracking-widest text-zinc-600">
+            Tradable product
+          </div>
+          {PRODUCT_NAV.map((item) => (
+            <NavLink
+              key={item.to}
+              to={item.to}
               className={({ isActive }) =>
                 `flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition ${
                   isActive ? "bg-zinc-800 text-zinc-100" : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200"

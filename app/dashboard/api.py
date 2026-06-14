@@ -303,10 +303,81 @@ def create_app(settings: Settings | None = None, storage: Storage | None = None,
     @app.get("/api/crisis/{strategy}", dependencies=dep)
     def crisis_view(strategy: str, universe: str = "us_stocks_50"):
         """Crisis-lab report for a strategy/universe (markdown), if generated."""
-        p = settings.reports_dir / f"crisis_{strategy}_{universe}.md"
+        p = settings.reports_dir / f"crisis_long_only_{strategy}_{universe}.md"
+        if not p.exists():
+            p = settings.reports_dir / f"crisis_{strategy}_{universe}.md"
         return {"available": p.exists(),
                 "report": p.read_text(encoding="utf-8") if p.exists()
-                else "not run; execute `statarb crisis-test`"}
+                else "not run; execute `statarb crisis-test-long-only`"}
+
+    @app.get("/api/trading212-config", dependencies=dep)
+    def trading212_config_view():
+        """Trading 212 connection config — booleans only, NEVER the secrets, and
+        a clear statement that live is hard-blocked."""
+        return {
+            "enabled": settings.trading212_enabled,
+            "mode": settings.trading212_mode,
+            "account_type": settings.trading212_account_type,
+            "api_key_configured": bool(settings.trading212_api_key),
+            "api_secret_configured": bool(settings.trading212_api_secret),
+            "allow_demo_orders": settings.trading212_allow_demo_orders,
+            "live_orders_supported": False,   # hard-blocked for this product
+            "kill_switch_active": _kill_switch_active(),
+        }
+
+    def _kill_switch_active() -> bool:
+        from app.risk.kill_switch import KillSwitch
+        return KillSwitch(settings.runtime_dir / "kill_switch.flag").is_active
+
+    @app.get("/api/long-only-order-preview", dependencies=dep)
+    def long_only_order_preview_view(
+        strategy: str = "long_only_xsec_momentum", universe: str = "us_stocks_50",
+        starting_cash: float = 10_000.0,
+    ):
+        """SAFE offline (shadow) order preview: target weights -> validated plan.
+        Connects to no broker and sends nothing. Read-only."""
+        try:
+            from app.brokers.trading212.instrument_cache import (
+                InstrumentCache,
+                synthetic_instruments,
+            )
+            from app.cli.main import _latest_long_only_weights
+            from app.execution.long_only_order_planner import LongOnlyOrderPlanner
+
+            weights, prices_t, symbols, _ = _latest_long_only_weights(
+                storage, strategy, universe, "1d")
+            planner = LongOnlyOrderPlanner(InstrumentCache(synthetic_instruments(symbols)))
+            planned = planner.plan(weights, {}, starting_cash, prices_t, market_open=False)
+            return {"available": True, "banner": "SHADOW MODE — SENDS NO ORDERS",
+                    "live_eligible": False, "orders": planned.order_rows(),
+                    "validation": {"ok": planned.validation.ok,
+                                   "checks": planned.validation.checks,
+                                   "issues": planned.validation.order_issues},
+                    "summary": planned.summary()}
+        except Exception as exc:  # noqa: BLE001
+            return {"available": False, "error": str(exc), "orders": [], "banner": "SHADOW"}
+
+    @app.get("/api/paper-status/{product}", dependencies=dep)
+    def paper_status_view(product: str = "long_only_t212"):
+        """Supervised paper session status (read-only)."""
+        from app.execution.supervised_paper import SupervisedPaperStore, supervised_status
+
+        return supervised_status(SupervisedPaperStore(settings.runtime_dir, product))
+
+    @app.get("/api/paper-final/{product}", dependencies=dep)
+    def paper_final_view(product: str = "long_only_t212", min_days: int = 30):
+        """Supervised paper final report (read-only); never claims live-eligible."""
+        from app.execution.supervised_paper import SupervisedPaperStore, final_report
+
+        store = SupervisedPaperStore(settings.runtime_dir, product)
+        if store.current_session() is None:
+            return {"available": False, "message": "no session — run supervised-paper-start"}
+        rep = final_report(store, min_days=min_days)
+        rep["available"] = True
+        equity = [{"date": r.get("date"), "equity": r.get("equity")}
+                  for r in store.load("daily_reports")]
+        rep["equity_curve"] = equity
+        return rep
 
     @app.get("/api/jobs", dependencies=dep)
     def jobs():

@@ -13,26 +13,37 @@ a strategy clears every gate on a real, official venue. The reasons, concretely:
    the expected maximum of 45 noise strategies — P(true > noise-max) = 0.375. It
    is an unproven candidate, not an established edge.
 
-3. **Return concentration is unresolved.** One month is ~30% of the flagship's
-   PnL and the best 5% of days exceed total return. The tradable long-only and
-   futures books fail the same gate (just over the 25%/month limit).
+3. **Return concentration** — RESOLVED for the long-only book (2026-06-14): EWMA
+   smoothing took its worst month from 26.1% to 23.5% (PASS). Crypto futures still
+   fails this gate. The best-5%-of-days share remains structurally high for any
+   daily directional book (not a defect smoothing can erase).
 
-4. **No crisis test.** The 2021–2026 window contains no 2008/2020-scale crash —
-   exactly momentum's worst case (Phase 4 outstanding).
+4. **Crisis evidence is synthetic.** The long-only crisis suite is complete but
+   the 2021–2026 window has no real 2008/2020 tail, so the −28% worst-case is a
+   synthetic/proxy bound, not observed history.
 
-5. **Survivorship bias.** The universes are today's survivors backtested into the
-   past (Phase 3 outstanding).
+5. **Survivorship is bounded, not eliminated.** The long-only edge survives random
+   name drops but roughly halves when the 5 biggest winners are removed; the
+   universe is still today's survivors. Eliminating the bias needs point-in-time
+   constituent data (not integrated).
 
-6. **No supervised paper period.** No product has traded paper/testnet for a
-   meaningful, reviewed period with TCA (Phase 5 outstanding).
+6. **No FORWARD supervised paper period has run.** The workflow exists and the
+   product is *eligible to begin* one, but eligibility ≠ a passed period; replayed
+   bars never count as forward calendar time.
 
-7. **Execution is not wired.** The Trading 212 demo order path and Binance
-   testnet keys are not connected — only shadow planners exist.
+7. **Execution is demo-only by design.** The Trading 212 DEMO order path is wired
+   (official Public API), but the live endpoint is hard-blocked and
+   `TRADING212_ALLOW_LIVE_ORDERS` is never consulted.
 
 8. **Policy.** No CFDs, no shorting on Invest/ISA, no scraping / browser
    automation / reverse-engineered or private APIs, and no leverage to flatter
    results — ever.
 
+**Status (2026-06-14):** long-only Trading 212 is now **eligible to BEGIN a
+supervised paper/shadow period** (`statarb product-decision` → `paper_candidate`).
+That is the strongest status any product holds, and it is still **not** live. The
+market-neutral flagship and crypto futures remain further back (reasons 1–4).
+
 Disabling live trading is not a limitation of the build; it is the build working
-as designed. See `docs/live_readiness.md` for the exact conditions and
-`TRADABLE_PRODUCT_REPORT.md` for the per-product verdicts.
+as designed. See `docs/live_readiness.md`, `PAPER_ELIGIBILITY_REPORT.md` and
+`TRADABLE_PRODUCT_REPORT.md`.

@@ -20,22 +20,28 @@ environment.
 > (`statarb alpha-registry list`). Re-validated numbers will replace the
 > legacy figures as the new pipeline processes them.
 
-> **⚠️ Tradable-product update (2026-06-13).** A follow-on engagement built the
-> path from research candidate to tradable product — see
-> [`TRADABLE_PRODUCT_REPORT.md`](TRADABLE_PRODUCT_REPORT.md) and run
+> **⚠️ Paper-readiness update (2026-06-14).** A focused sprint took the long-only
+> Trading 212 book from "6/7 gates, not paper-eligible" to **ELIGIBLE TO BEGIN a
+> supervised paper/shadow period** — see
+> [`PAPER_ELIGIBILITY_REPORT.md`](PAPER_ELIGIBILITY_REPORT.md) and run
 > `statarb product-decision`. Headlines:
-> - The **market-neutral flagship is NOT tradable** (no shorting venue) and,
->   corrected for the real ~45-config search, **FAILS its deflated Sharpe**
->   (P(true>noise-max)=0.375) — an unproven candidate, not an edge.
-> - A new **long-only Trading 212 book** beats SPY/QQQ risk-adjusted (Sharpe
->   1.53, +23%/yr alpha) and is the **lead paper candidate** (6/7 gates; NOT
->   market-neutral).
-> - A new **crypto-futures** path (Binance testnet, live blocked) is promising
->   but extreme-risk and short-sampled (5/6 gates).
-> - **Nothing is live-eligible; nothing is yet paper/testnet-eligible.** See
+> - **EWMA target-weight smoothing closed the concentration gate** (worst month
+>   26.1% → **23.5%**) without breaking OOS (Sharpe 1.65, 2/2 folds) — and lowered
+>   turnover and drawdown. Default selected by validation, not curve-fit. See
+>   [`docs/concentration_mitigation.md`](docs/concentration_mitigation.md).
+> - **Survivorship bounded** (but the edge leans on the top winners) and **crisis
+>   tested** (synthetic; the regime filter is the real crash protection).
+> - The **Trading 212 DEMO order path is wired** (official API, demo-only; live
+>   hard-blocked) with a full demo execution gate, plus a **supervised paper
+>   workflow** (`supervised-paper-start/status/daily-report/final-report/stop`).
+> - The **market-neutral flagship is still NOT tradable** (no venue; FAILS
+>   deflated Sharpe). **Crypto futures** still testnet-only (5/6, short sample).
+> - **Nothing is live-eligible.** Long-only is eligible to *begin* paper, not to
+>   trade real capital. See
 >   [`docs/tradability_matrix.md`](docs/tradability_matrix.md),
 >   [`docs/live_readiness.md`](docs/live_readiness.md),
->   [`docs/no_live_trading_reason.md`](docs/no_live_trading_reason.md).
+>   [`docs/no_live_trading_reason.md`](docs/no_live_trading_reason.md),
+>   [`docs/long_only_t212_paper_plan.md`](docs/long_only_t212_paper_plan.md).
 
 ---
 
@@ -210,6 +216,20 @@ Every CLI command (run `statarb <command> --help` for the full option list):
 | `paper-trade-basket` | live-data paper trading of the BASKET ensemble (daily EOD refresh, risk-gated rebalancing, simulated shorts) | `--universe`, `--interval`, `--sleeves`, `--leverage`, `--source`, `--iterations`, `--no-refresh` |
 | `live-trade` | attempt to enable live trading; refuses unless every gate passes | `--broker`, `--strategy`, `--confirm-live` |
 | `kill-switch` | engage/disengage/inspect the global kill switch | `--engage`, `--disengage`, `--reason` |
+| **Long-only T212 paper-readiness (Path A)** | | |
+| `concentration-fix-backtest` | baseline vs one concentration fix (EWMA for long-only) | `--strategy long_only_xsec_momentum`, `--method ewma` |
+| `compare-concentration-fixes` | sweep the smoothing family, recommend the fix (trials registered) | `--strategy long_only_xsec_momentum` |
+| `long-only-readiness` | full research + operational gate; honest paper-eligibility verdict | `--strategy`, `--smoothing`, `--full`, `--write-report` |
+| `survivorship-stress-long-only` | random/sector-balanced/best-5/worst-5 drops + bootstrap; eliminated/bounded/unresolved | `--strategy`, `--universe` |
+| `universe-bias-report` | universe survivorship status + the strategy bias bound | `--universe`, `--strategy` |
+| `crisis-test-long-only` | expanded synthetic crisis suite + regime/smoothing effects | `--strategy`, `--universe` |
+| `crisis-report` | crisis + crash-protection summary | `--product long_only_t212` |
+| `trading212-check` | check the Trading 212 DEMO connection (read-only; live blocked) | `--mode demo` |
+| `trading212-instruments` | list instrument metadata (tradability/fractional/minimums) | `--mode demo`, `--universe` |
+| `long-only-order-preview` | preview today's orders (shadow or demo_preview); sends nothing | `--broker trading212`, `--mode` |
+| `paper-trade-long-only` | plan/preview/submit long-only orders; demo-only, live hard-blocked | `--mode shadow\|demo_preview\|demo_execute`, `--confirm-demo` |
+| `supervised-paper-start` | start/advance a calendar-aware supervised paper period | `--product long_only_t212`, `--mode`, `--replay`, `--min-days` |
+| `supervised-paper-status` / `-daily-report` / `-final-report` / `-stop` | inspect / report / stop the supervised period | `--product`, `--min-days`, `--reason` |
 | `report` | show the most recent backtest run | `--last-backtest/--all` |
 | `dashboard` | serve the web control panel (FastAPI + React) | `--port`, `--host` |
 

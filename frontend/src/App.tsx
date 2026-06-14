@@ -11,6 +11,16 @@ import BacktestDetail from "./pages/BacktestDetail";
 import Brokers from "./pages/Brokers";
 import Logs from "./pages/Logs";
 import Settings from "./pages/Settings";
+import ProductDecisionPage from "./pages/ProductDecisionPage";
+import TradabilityMatrixPage from "./pages/TradabilityMatrixPage";
+import BlockersPage from "./pages/BlockersPage";
+import LiveReadinessPage from "./pages/LiveReadinessPage";
+import ConcentrationDiagnosticsPage from "./pages/ConcentrationDiagnosticsPage";
+import DeflatedSharpePage from "./pages/DeflatedSharpePage";
+import CrisisLabPage from "./pages/CrisisLabPage";
+import LongOnlyPaperSetupPage from "./pages/LongOnlyPaperSetupPage";
+import Trading212OrderPreviewPage from "./pages/Trading212OrderPreviewPage";
+import SupervisedPaperMonitorPage from "./pages/SupervisedPaperMonitorPage";
 
 export default function App() {
   return (
@@ -27,6 +37,17 @@ export default function App() {
         <Route path="/brokers" element={<Brokers />} />
         <Route path="/logs" element={<Logs />} />
         <Route path="/settings" element={<Settings />} />
+        {/* Tradable-product / paper-readiness */}
+        <Route path="/product-decision" element={<ProductDecisionPage />} />
+        <Route path="/tradability" element={<TradabilityMatrixPage />} />
+        <Route path="/blockers" element={<BlockersPage />} />
+        <Route path="/live-readiness" element={<LiveReadinessPage />} />
+        <Route path="/concentration" element={<ConcentrationDiagnosticsPage />} />
+        <Route path="/deflated-sharpe" element={<DeflatedSharpePage />} />
+        <Route path="/crisis-lab" element={<CrisisLabPage />} />
+        <Route path="/paper-setup" element={<LongOnlyPaperSetupPage />} />
+        <Route path="/order-preview" element={<Trading212OrderPreviewPage />} />
+        <Route path="/paper-monitor" element={<SupervisedPaperMonitorPage />} />
       </Routes>
     </Layout>
   );

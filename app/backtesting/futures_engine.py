@@ -92,7 +92,6 @@ def run_futures_backtest(
     pass_aux = bool(getattr(weight_fn, "wants_aux", False)) and aux is not None
 
     returns = close.pct_change().fillna(0.0).to_numpy()
-    low = (close if open_ is None else close).to_numpy()  # placeholder; use aux low/high
     high_np = aux["high"].reindex(columns=columns).to_numpy() if (aux and "high" in aux) else None
     low_np = aux["low"].reindex(columns=columns).to_numpy() if (aux and "low" in aux) else None
     prev_close = close.shift(1).to_numpy()

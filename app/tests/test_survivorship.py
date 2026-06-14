@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import pytest
 
-from app.backtesting.survivorship import run_survivorship_stress
+from app.backtesting.survivorship import (
+    run_survivorship_stress,
+    run_universe_bias_report,
+)
 from app.data.point_in_time import (
     StaticSurvivorProvider,
     UnavailablePITProvider,
@@ -41,3 +44,33 @@ def test_survivorship_stress_bounds_a_stable_strategy():
     assert res.n == 6
     assert res.bounded                            # stable -> bounded
     assert res.sharpe_p05 > 0.4
+
+
+def test_universe_bias_report_bounded_when_winner_drop_survives():
+    sectors = {s: "tech" for s in StaticSurvivorProvider("us_stocks_50").members_as_of("x", None)}
+    name_returns = {s: 1.0 for s in sectors}
+
+    def run_on_symbols(symbols):
+        return {"sharpe": 1.4, "total_return_pct": 50.0, "max_drawdown_pct": -15.0}
+
+    rep = run_universe_bias_report("us_stocks_50", run_on_symbols, sectors=sectors,
+                                   name_returns=name_returns, n_random=4)
+    assert rep.verdict() == "bounded"             # stable across all drops
+    assert not rep.pit_data_used                  # never claims 'eliminated'
+    assert any(s.label == "best_5_removed" for s in rep.scenarios)
+    assert any(s.label == "sector_balanced_drop_20pct" for s in rep.scenarios)
+
+
+def test_universe_bias_report_unresolved_when_edge_hinges_on_winners():
+    names = StaticSurvivorProvider("us_stocks_50").members_as_of("x", None)
+    name_returns = {s: float(i) for i, s in enumerate(names)}  # ranked winners
+
+    def run_on_symbols(symbols):
+        # collapses badly whenever names are dropped (edge hinges on the full set)
+        return {"sharpe": 1.4 if len(symbols) == len(names) else 0.1,
+                "total_return_pct": 50.0, "max_drawdown_pct": -15.0}
+
+    rep = run_universe_bias_report("us_stocks_50", run_on_symbols,
+                                   name_returns=name_returns, n_random=4)
+    assert rep.verdict() == "unresolved"
+    assert rep.verdict() != "eliminated"          # PIT data not used

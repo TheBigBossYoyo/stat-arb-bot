@@ -8,10 +8,15 @@ import pandas as pd
 from app.backtesting.crisis import (
     SCENARIOS,
     correlation_spike,
+    covid_crash_rebound,
+    long_only_scenarios,
     market_gap,
     momentum_crash,
     run_crisis_suite,
+    sector_shock,
+    sustained_bear,
     vol_spike,
+    vol_whipsaw,
 )
 
 
@@ -59,3 +64,39 @@ def test_run_crisis_suite_reports_each_scenario():
     for name in SCENARIOS:
         assert name in table.index
     assert "crisis_max_dd_pct" in table.columns
+
+
+# --- Phase 4 expanded long-only scenarios -------------------------------------
+
+def test_new_long_only_scenarios_change_prices_and_stay_positive():
+    close = _prices()
+    for transform in (covid_crash_rebound, sustained_bear, vol_whipsaw):
+        out = transform(close)
+        assert out.shape == close.shape
+        assert not out.equals(close)
+        assert (out > 0).all().all()
+
+
+def test_covid_crash_rebound_dips_then_recovers():
+    close = _prices(seed=3)
+    out = covid_crash_rebound(close, crash=-0.3, rebound=0.25, at_frac=0.6)
+    # the crash trough is below the pre-crash level
+    pre = close.iloc[int(len(close) * 0.6) - 1].mean()
+    trough = out.iloc[int(len(close) * 0.6):].min().min()
+    assert trough < pre
+
+
+def test_sector_shock_only_hits_named_members():
+    close = _prices(k=6)
+    members = ["A0", "A2"]
+    out = sector_shock(close, members, window_frac=0.2, magnitude=-0.4)
+    # untouched names are identical; named members fall
+    assert out["A1"].equals(close["A1"])
+    assert out["A0"].iloc[-1] < close["A0"].iloc[-1]
+
+
+def test_long_only_scenarios_include_synthetic_tail_and_sectors():
+    scen = long_only_scenarios({"A0": "tech", "A1": "tech", "A2": "finance", "A3": "finance"})
+    for name in ("covid_crash_rebound", "sustained_bear_2008", "vol_whipsaw",
+                 "gap_up_after_crash", "tech_sector_crash"):
+        assert name in scen

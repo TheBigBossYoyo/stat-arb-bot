@@ -98,7 +98,7 @@ class FuturesRiskModel:
                 if w[sym] == 0:
                     continue
                 # cost of holding this direction: long pays +funding
-                cost = float((funding_apr.get(sym, 0.0) or 0.0)) * (1 if w[sym] > 0 else -1)
+                cost = float(funding_apr.get(sym, 0.0) or 0.0) * (1 if w[sym] > 0 else -1)
                 edge = float(expected_edge_apr.get(sym, 0.0) or 0.0)
                 if cost > 0 and edge < cost * lim.min_funding_edge_ratio:
                     w[sym] = 0.0
