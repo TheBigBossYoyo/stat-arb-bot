@@ -21,6 +21,7 @@ import CrisisLabPage from "./pages/CrisisLabPage";
 import LongOnlyPaperSetupPage from "./pages/LongOnlyPaperSetupPage";
 import Trading212OrderPreviewPage from "./pages/Trading212OrderPreviewPage";
 import SupervisedPaperMonitorPage from "./pages/SupervisedPaperMonitorPage";
+import OperatorPaperModePage from "./pages/OperatorPaperModePage";
 
 export default function App() {
   return (
@@ -48,6 +49,7 @@ export default function App() {
         <Route path="/paper-setup" element={<LongOnlyPaperSetupPage />} />
         <Route path="/order-preview" element={<Trading212OrderPreviewPage />} />
         <Route path="/paper-monitor" element={<SupervisedPaperMonitorPage />} />
+        <Route path="/operator" element={<OperatorPaperModePage />} />
       </Routes>
     </Layout>
   );

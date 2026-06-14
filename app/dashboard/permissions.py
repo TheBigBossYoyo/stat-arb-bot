@@ -26,6 +26,7 @@ CONFIRM_PHRASES: dict[str, str] = {
     "flatten_all": "FLATTEN ALL",
     "cancel_all_orders": "CANCEL ALL ORDERS",
     "enable_live": "ENABLE LIVE TRADING",
+    "run_demo_paper_day": "RUN DEMO PAPER DAY",
 }
 
 

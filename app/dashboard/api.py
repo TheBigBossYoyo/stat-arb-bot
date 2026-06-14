@@ -379,6 +379,62 @@ def create_app(settings: Settings | None = None, storage: Storage | None = None,
         rep["equity_curve"] = equity
         return rep
 
+    # ---- operator paper mode (Phase 7) -------------------------------------------
+
+    @app.get("/api/operator/status", dependencies=dep)
+    def operator_status_view(product: str = "long_only_t212", min_days: int = 30):
+        """Everything the Operator Paper Mode page needs (read-only). Never live."""
+        from app.cli.main import _supervised_next_action
+        from app.execution.paper_supervisor import (
+            DAILY_SUMMARY_NAME,
+            health_for,
+            operator_checklist,
+            product_status,
+        )
+        from app.research.product_decision import evaluate_products
+
+        h = health_for(settings, storage, product=product, min_days=min_days)
+        _ok, decision_status, _ps = product_status(settings, storage, product)
+        d = evaluate_products(settings, storage)
+        checklist = operator_checklist(settings, h, decision_status,
+                                       kill_switch_active=_kill_switch_active())
+        next_action = (h.get("message") if h["state"] == "NOT STARTED" else
+                       _supervised_next_action(h["state"], product, h.get("mode", "shadow"),
+                                               h.get("days_remaining", 0)))
+        summary_path = settings.runtime_dir / "paper" / DAILY_SUMMARY_NAME
+        return {
+            "product": product,
+            "live_eligible": False,
+            "controls_enabled": settings.dashboard_controls_enabled,
+            "kill_switch_active": _kill_switch_active(),
+            "health": h,
+            "decision": {"headline": d.headline, "recommended": d.recommended,
+                         "action": d.action, "capital_stage": d.capital_stage,
+                         "status": decision_status},
+            "trading212": {
+                "enabled": settings.trading212_enabled,
+                "mode": settings.trading212_mode,
+                "api_key_configured": bool(settings.trading212_api_key),
+                "api_secret_configured": bool(settings.trading212_api_secret),
+                "allow_demo_orders": settings.trading212_allow_demo_orders,
+                "live_orders_supported": False,
+            },
+            "checklist": checklist,
+            "next_action": next_action,
+            "latest_summary": (summary_path.read_text(encoding="utf-8")
+                               if summary_path.exists() else ""),
+            "confirm_phrase_demo_execute": "RUN DEMO PAPER DAY",
+        }
+
+    @app.get("/api/operator/paper-vs-backtest", dependencies=dep)
+    def operator_paper_vs_backtest(product: str = "long_only_t212"):
+        """Operational paper-vs-backtest comparison (read-only)."""
+        from app.execution.paper_vs_backtest import compare
+        from app.execution.supervised_paper import SupervisedPaperStore
+
+        return compare(SupervisedPaperStore(settings.runtime_dir, product),
+                       product=product).as_dict()
+
     @app.get("/api/jobs", dependencies=dep)
     def jobs():
         return service.list_jobs()
@@ -425,6 +481,29 @@ def create_app(settings: Settings | None = None, storage: Storage | None = None,
         result = "not available: no live order connectors are enabled in this deployment."
         record_audit("cancel_all_orders", True, {"reason": body.reason}, result)
         raise HTTPException(status_code=501, detail=result)
+
+    @app.post("/api/operator/run/{mode}", dependencies=dep)
+    def operator_run(mode: str, body: ConfirmedAction):
+        """Run one supervised paper day from the dashboard (audited; controls only).
+
+        shadow / demo_preview need the TRADER role; demo_execute additionally needs
+        the ADMIN role AND the exact phrase 'RUN DEMO PAPER DAY'. There is NO live
+        path — every mode is paper/demo only and re-validated server-side."""
+        if mode not in ("shadow", "demo_preview", "demo_execute"):
+            raise HTTPException(400, "mode must be shadow | demo_preview | demo_execute")
+        require_role(settings, Role.TRADER)
+        confirm_demo = False
+        if mode == "demo_execute":
+            require_role(settings, Role.ADMIN)
+            require_phrase("run_demo_paper_day", body.confirm_phrase)
+            confirm_demo = True
+        from app.cli.main import run_supervised_paper_daily
+
+        res = run_supervised_paper_daily(settings, storage, product="long_only_t212",
+                                         mode=mode, confirm_demo=confirm_demo)
+        record_audit(f"operator_run_{mode}", True, {"mode": mode},
+                     res.get("status_line", "")[:200])
+        return {"ok": not res.get("refused", False), "live_eligible": False, **res}
 
     @app.post("/api/strategies/{name}/pause", dependencies=dep)
     def pause_strategy(name: str):

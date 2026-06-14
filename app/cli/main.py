@@ -1958,6 +1958,41 @@ def trading212_check(mode: str = typer.Option("demo", help="demo only; live is b
     console.print("[bold red]NOT LIVE ELIGIBLE[/bold red] — demo endpoint only.")
 
 
+@app.command("trading212-demo-setup-check")
+def trading212_demo_setup_check(
+    connect: bool = typer.Option(True, "--connect/--no-connect",
+                                 help="probe the DEMO endpoints (needs keys)"),
+) -> None:
+    """Beginner-friendly check that your Trading 212 DEMO setup is ready.
+
+    Verifies .env, the env flags, that keys are present (NEVER printed), and that
+    the demo account/cash/positions/instruments endpoints are reachable. Confirms
+    live and CFDs are unreachable. Secrets are never shown."""
+    settings, _ = _bootstrap()
+    from app.brokers.trading212.setup_check import run_setup_check
+    from app.config.settings import PROJECT_ROOT
+
+    console.print("[bold yellow]DEMO ONLY[/bold yellow] — checking your Trading 212 demo setup. "
+                  "[dim]Secrets are never displayed.[/dim]")
+    result = run_setup_check(settings, env_path=PROJECT_ROOT / ".env", connect=connect)
+    table = Table(title="Trading 212 DEMO setup check")
+    for col in ("check", "status", "detail"):
+        table.add_column(col)
+    for c in result.checks:
+        mark = "PASS" if c.ok else ("WARN" if c.severity in ("optional", "info") else "FAIL")
+        color = "green" if c.ok else ("yellow" if c.severity in ("optional", "info") else "red")
+        table.add_row(c.name, f"[{color}]{mark}[/]", c.detail)
+    console.print(table)
+    if result.ok:
+        console.print("\n[green]Required checks passed.[/green] You can run a shadow / demo_preview "
+                      "paper day. demo_execute additionally needs TRADING212_ALLOW_DEMO_ORDERS=true "
+                      "and --confirm-demo.")
+    else:
+        console.print("\n[red]Some required checks failed.[/red] Fix the FAIL rows above, then "
+                      "re-run this command. Shadow mode works fully offline meanwhile.")
+    console.print("[bold red]NOT LIVE ELIGIBLE[/bold red] — live and CFDs are unreachable.")
+
+
 @app.command("trading212-instruments")
 def trading212_instruments(
     mode: str = typer.Option("demo"),
@@ -3260,9 +3295,20 @@ def _supervised_paper_day(settings, storage, *, product, strategy, universe, int
 
     cache = InstrumentCache(synthetic_instruments(list(prices.symbols)))
     planner = LongOnlyOrderPlanner(cache)
-    market_open = True if replay else is_us_market_open()
+    market_hours_ok = True
+    if replay:
+        market_open = True
+    else:
+        try:
+            market_open = is_us_market_open()
+        except Exception:  # noqa: BLE001 - record as a stop-rule signal, do not crash the day
+            market_open, market_hours_ok = True, False
     planned = planner.plan(weights, dict(book.positions), book.cash, prices_t,
                            market_open=market_open)
+    # long-only / no-leverage invariants on the EMITTED (post-smoothing) weights
+    gross_w = sum(max(0.0, float(w)) for w in weights.values())
+    smoothing_ok = all(float(w) >= -1e-9 for w in weights.values()) and gross_w <= 1.0 + 1e-4
+    n_untradable = sum(1 for s, w in weights.items() if w > 1e-9 and not cache.is_tradable(s)[0])
 
     # simulate fills against the paper book (the paper equity curve)
     slippage_bps = 5.0
@@ -3303,7 +3349,9 @@ def _supervised_paper_day(settings, storage, *, product, strategy, universe, int
         "n_orders": len(planned.plan.orders), "n_rejected": n_rejected,
         "demo_orders_sent": demo_sent, "broker_errors": broker_errors,
         "top_weight": round(top_weight, 4), "drawdown_pct": drawdown_pct,
-        "data_quality_events": 0})
+        "n_holdings": len(book.positions), "smoothing_ok": smoothing_ok,
+        "n_untradable": n_untradable, "market_hours_ok": market_hours_ok,
+        "market_open": market_open, "data_quality_events": 0})
     for row in planned.order_rows():
         store.append("orders", {"date": date, **row})
     store.append("reconciliations", {"date": date, **recon.summary()})
@@ -3323,7 +3371,22 @@ def _supervised_paper_day(settings, storage, *, product, strategy, universe, int
             bench_row[f"{name.lower()}_equity"] = round(
                 session.starting_cash * float(ser.iloc[min(bar_idx, len(ser) - 1)]) / base, 2)
     store.append("benchmark_snapshots", bench_row)
-    return peak
+    day_info = {
+        "product": product, "date": date, "mode": mode, "replay": replay,
+        "equity": round(equity, 2), "gross_exposure": gross_exp,
+        "top_weight": round(top_weight, 4), "drawdown_pct": drawdown_pct,
+        "n_orders": len(planned.plan.orders), "n_rejected": n_rejected,
+        "demo_orders_sent": demo_sent, "broker_errors": broker_errors,
+        "risk_status": "BREACH" if breach else "OK",
+        "expected_slippage_bps": expected_slippage_bps(planned.plan),
+        "realized_slippage_bps": slippage_bps,
+        "target_weights": {s: float(w) for s, w in weights.items() if w > 1e-9},
+        "planned_orders": planned.order_rows(),
+        "refused_orders": [[s, r] for s, r in planned.plan.skipped],
+        "smoothing_ok": smoothing_ok, "n_untradable": n_untradable,
+        "market_hours_ok": market_hours_ok,
+    }
+    return peak, day_info
 
 
 @app.command("supervised-paper-start")
@@ -3380,13 +3443,13 @@ def supervised_paper_start(
     n = len(prices.close)
     if replay > 0:
         for idx in range(max(301, n - replay), n):
-            peak = _supervised_paper_day(
+            peak, _ = _supervised_paper_day(
                 settings, storage, product=product, strategy=strategy, universe=universe,
                 interval=interval, mode=session.mode, session=session, book=book, fn=fn,
                 prices=prices, benchmarks=benchmarks, bar_idx=idx, replay=True,
                 confirm_demo=confirm_demo, store=store, peak_equity=peak)
     else:
-        peak = _supervised_paper_day(
+        peak, _ = _supervised_paper_day(
             settings, storage, product=product, strategy=strategy, universe=universe,
             interval=interval, mode=session.mode, session=session, book=book, fn=fn,
             prices=prices, benchmarks=benchmarks, bar_idx=n - 1, replay=False,
@@ -3487,6 +3550,308 @@ def supervised_paper_stop(
         console.print("[yellow]No session to stop.[/yellow]")
         raise typer.Exit(1)
     console.print(f"[green]Stopped[/green] {s.session_id}: {reason}")
+
+
+# --------------------------------------------------------------------------------
+# Operator daily routine, health, stop rules, paper-vs-backtest (operator mission)
+# --------------------------------------------------------------------------------
+
+_STATE_COLOR = {"NOT STARTED": "yellow", "IN PROGRESS": "blue", "PAUSED": "yellow",
+                "FAILED": "red", "READY FOR FINAL REVIEW": "green", "OK": "green"}
+
+
+def _supervised_next_action(state: str, product: str, mode: str, days_remaining: int) -> str:
+    if state == "FAILED":
+        return ("Investigate the FAILED stop rule(s) — the period is terminal. Fix the cause, "
+                "then `supervised-paper-start --reset` to restart.")
+    if state == "PAUSED":
+        return ("Resolve the PAUSED condition(s), then re-run: "
+                f"statarb supervised-paper-daily --product {product} --mode {mode}")
+    if state == "READY FOR FINAL REVIEW":
+        return f"Run: statarb supervised-paper-final-report --product {product}"
+    return ("Run again next trading day: "
+            f"statarb supervised-paper-daily --product {product} --mode {mode} "
+            f"({days_remaining} forward day(s) remaining).")
+
+
+def run_supervised_paper_daily(settings, storage, *, product: str, mode: str,
+                               confirm_demo: bool = False, min_days: int = 30,
+                               starting_cash: float = 10_000.0) -> dict:
+    """Run the whole supervised paper daily routine for ONE day and RETURN a
+    structured (JSON-serialisable) result — no console I/O. Shared by the CLI
+    command and the dashboard operator endpoints. Live is never in scope."""
+    from app.execution.paper_supervisor import (
+        evaluate_stop_rules,
+        health,
+        preflight,
+        product_status,
+        render_daily_summary,
+        write_daily_summary,
+    )
+    from app.execution.shadow import load_paper_book, save_paper_book
+    from app.execution.supervised_paper import PaperSession, SupervisedPaperStore
+
+    strategy, universe, interval = SUPERVISED_PRODUCTS[product]
+    store = SupervisedPaperStore(settings.runtime_dir, product)
+    res: dict = {"product": product, "mode": mode, "refused": False, "terminal": False,
+                 "refusal_reason": "", "preflight": [], "day_info": None, "stop_rules": None,
+                 "state": None, "health": None, "status_line": "", "next_action": "",
+                 "summary_path": None, "session_started": None, "data_stale": False}
+
+    # --- session: auto-start if none; refuse if a stopped session is present ---
+    session = store.current_session()
+    if session is None:
+        session = PaperSession.new(product, mode, min_days=min_days, starting_cash=starting_cash)
+        store.start_session(session)
+        res["session_started"] = session.session_id
+    elif session.status != "active":
+        reason = (f"session {session.session_id} is stopped "
+                  f"({session.stop_reason or 'manual'}) — run supervised-paper-start --reset")
+        res.update(refused=True, refusal_reason=reason,
+                   status_line=f"Paper day refused: {reason}.",
+                   next_action="Run `supervised-paper-start --reset` to begin a new period.")
+        return res
+
+    # --- pre-flight gates (REFUSE the day if any fails) ---
+    kill_active = _kill_switch_active(settings)
+    pre = preflight(settings, storage, product=product, mode=mode,
+                    confirm_demo=confirm_demo, kill_switch_active=kill_active)
+    res["preflight"] = [{"name": c.name, "ok": c.ok, "detail": c.detail} for c in pre.checks]
+    if not pre.ok:
+        if pre.terminal and store.current_session().status == "active":
+            store.stop_session(f"pre-flight terminal failure: {pre.refusal_reason}")
+        res.update(refused=True, terminal=pre.terminal, refusal_reason=pre.refusal_reason,
+                   status_line=f"Paper day refused: {pre.refusal_reason}.",
+                   next_action=("Terminal failure — the session is marked FAILED."
+                                if pre.terminal else
+                                "Fix the failing pre-flight gate(s), then re-run."))
+        return res
+
+    # --- refresh data + generate/smooth weights + run + record the day ---
+    defaults, prices, config, reb_every = _long_only_setup(storage, universe, interval)
+    res["data_stale"] = not _market_data_fresh(prices.index[-1])
+    regime_cfg = _regime_cfg(True, 0.0)
+    sm = _smoothing_config(defaults)
+    fn, _ = _build_long_only(strategy, defaults, universe, interval, regime_cfg,
+                             reb_every, smoothing=sm)
+    benchmarks = _load_benchmarks(storage, interval)
+    book = load_paper_book(settings.runtime_dir, f"paper_{product}", session.starting_cash)
+    daily_rows = store.load("daily_reports")
+    peak = max((float(r["equity"]) for r in daily_rows), default=session.starting_cash)
+    prev_equity = next((float(r["equity"]) for r in reversed(daily_rows)
+                        if not r.get("replay") and r.get("equity") is not None),
+                       session.starting_cash)
+    peak, day_info = _supervised_paper_day(
+        settings, storage, product=product, strategy=strategy, universe=universe,
+        interval=interval, mode=mode, session=session, book=book, fn=fn, prices=prices,
+        benchmarks=benchmarks, bar_idx=len(prices.close) - 1, replay=False,
+        confirm_demo=confirm_demo, store=store, peak_equity=peak)
+    save_paper_book(settings.runtime_dir, f"paper_{product}", book)
+
+    # --- cumulative figures + stop rules + health ---
+    _ok, decision_status, _ps = product_status(settings, storage, product)
+    rules = evaluate_stop_rules(store, settings, kill_switch_active=kill_active,
+                                decision_status=decision_status)
+    if rules.state == "FAILED" and store.current_session().status == "active":
+        store.stop_session("stop rule FAILED: "
+                           + "; ".join(r.rule for r in rules.triggered if r.severity == "FAILED"))
+    h = health(store, settings, kill_switch_active=kill_active,
+               decision_status=decision_status, min_days=session.min_days)
+    day_info["paper_pnl_day"] = round(day_info["equity"] - prev_equity, 2)
+    day_info["paper_pnl_pct"] = h.get("paper_pnl_pct")
+    day_info["benchmark_pnl_pct"] = h.get("benchmark_pnl_pct")
+
+    submitted = int(day_info.get("demo_orders_sent", 0))
+    if mode == "demo_execute" and submitted > 0:
+        status_line = "Demo orders submitted successfully."
+    elif mode == "demo_execute":
+        status_line = ("Demo preview recorded successfully "
+                       "(demo gate did not pass — nothing submitted).")
+    elif mode == "demo_preview":
+        status_line = "Demo preview recorded successfully."
+    else:
+        status_line = "Shadow day recorded successfully."
+
+    state = h["state"]
+    next_action = _supervised_next_action(state, product, mode, h.get("days_remaining", 0))
+    md = render_daily_summary(day_info, health_state=state, next_action=next_action,
+                              status_line=status_line)
+    summary_path = write_daily_summary(settings.runtime_dir, md)
+    res.update(day_info=day_info, stop_rules=rules.as_dict(), state=state, health=h,
+               status_line=status_line, next_action=next_action, summary_path=str(summary_path))
+    return res
+
+
+def _print_stop_rules_dict(stop_rules: dict | None) -> None:
+    if not stop_rules or not stop_rules.get("triggered"):
+        console.print("[green]Stop rules: none triggered (OK).[/green]")
+        return
+    console.print(f"[bold]Stop rules: {stop_rules['state']}[/bold]")
+    for r in stop_rules["triggered"]:
+        color = "red" if r["severity"] == "FAILED" else "yellow"
+        console.print(f"  [{color}]{r['severity']}[/] {r['rule']} — {r['detail']}")
+        console.print(f"      [dim]remediation: {r['remediation']}[/dim]")
+
+
+@app.command("supervised-paper-daily")
+def supervised_paper_daily(
+    product: str = typer.Option("long_only_t212", help=" | ".join(SUPERVISED_PRODUCTS)),
+    mode: str = typer.Option("shadow", help="shadow | demo_preview | demo_execute"),
+    confirm_demo: bool = typer.Option(False, "--confirm-demo",
+                                      help="required to submit DEMO orders in demo_execute mode"),
+    min_days: int = typer.Option(30, help="min FORWARD calendar days to pass (new session only)"),
+    starting_cash: float = typer.Option(10_000.0, help="starting cash (new session only)"),
+) -> None:
+    """Run the WHOLE supervised paper routine for one day (the operator command).
+
+    Loads config, verifies the product is still paper_candidate, that live trading
+    is disabled and the kill switch is off; refreshes data; generates + smooths
+    target weights; validates long-only / Trading 212 constraints; previews orders
+    (and, only in demo_execute with --confirm-demo, submits to the DEMO account);
+    reconciles; computes paper / benchmark PnL, TCA and risk; updates the session
+    tables; writes the daily summary; evaluates the stop rules; and prints the
+    exact next action. Live is never in scope."""
+    settings, storage = _bootstrap()
+    if product not in SUPERVISED_PRODUCTS:
+        raise typer.BadParameter(f"unknown product {product!r}; choose {list(SUPERVISED_PRODUCTS)}")
+    res = run_supervised_paper_daily(settings, storage, product=product, mode=mode,
+                                     confirm_demo=confirm_demo, min_days=min_days,
+                                     starting_cash=starting_cash)
+    if res.get("session_started"):
+        console.print(f"[green]Started[/green] supervised session {res['session_started']} "
+                      f"({product}, mode={mode}, min_days={min_days}).")
+    if res["preflight"]:
+        console.print(f"\n[bold]Pre-flight[/bold] ({product}, mode={mode}):")
+        for c in res["preflight"]:
+            mark = "PASS" if c["ok"] else "FAIL"
+            console.print(f"  [{'green' if c['ok'] else 'red'}]{mark}[/] {c['name']}"
+                          + (f" [dim]({c['detail']})[/dim]" if not c["ok"] else ""))
+    if res["refused"]:
+        if res["terminal"]:
+            console.print("[red]Session marked FAILED (terminal pre-flight failure).[/red]")
+        console.print(f"[bold red]{res['status_line']}[/bold red]")
+        raise typer.Exit(1)
+    if res.get("data_stale"):
+        console.print("[yellow]WARNING: latest bar is stale — run `statarb download-data` "
+                      "before the next paper day.[/yellow]")
+    di = res["day_info"]
+    table = Table(title=f"Supervised paper day — {product} {di['date']}")
+    table.add_column("metric")
+    table.add_column("value", justify="right")
+    for k in ("mode", "equity", "paper_pnl_day", "paper_pnl_pct", "benchmark_pnl_pct",
+              "gross_exposure", "top_weight", "drawdown_pct", "n_orders", "n_rejected",
+              "demo_orders_sent", "broker_errors", "risk_status"):
+        table.add_row(k, str(di.get(k)))
+    console.print(table)
+    _print_stop_rules_dict(res["stop_rules"])
+    state = res["state"]
+    console.print(f"\n[bold]Session health:[/bold] [{_STATE_COLOR.get(state, 'white')}]{state}[/]")
+    console.print(f"[dim]Daily summary written to {res['summary_path']}[/dim]")
+    console.print(f"\n[bold]Next action:[/bold] {res['next_action']}")
+    console.print("[bold red]NOT LIVE ELIGIBLE.[/bold red]")
+    color = "green" if "successfully" in res["status_line"] else "yellow"
+    console.print(f"\n[bold {color}]{res['status_line']}[/]")
+
+
+@app.command("supervised-paper-health")
+def supervised_paper_health(
+    product: str = typer.Option("long_only_t212", help=" | ".join(SUPERVISED_PRODUCTS)),
+    min_days: int = typer.Option(30),
+) -> None:
+    """Single health view of the supervised paper period (the morning check).
+
+    Prints NOT STARTED / IN PROGRESS / PAUSED / FAILED / READY FOR FINAL REVIEW
+    plus days completed/remaining, PnL vs benchmark, tracking error, drawdown,
+    concentration, turnover, slippage, rejects, broker errors, risk breaches, data
+    quality, and whether the final report can be generated."""
+    settings, storage = _bootstrap()
+    from app.execution.paper_supervisor import health_for
+
+    h = health_for(settings, storage, product=product, min_days=min_days)
+    state = h["state"]
+    console.print(f"[bold {_STATE_COLOR.get(state, 'white')}]== {state} =="
+                  f"[/]  ({product})")
+    if state == "NOT STARTED":
+        console.print(f"[yellow]{h.get('message')}[/yellow]")
+        return
+    table = Table(title=f"Supervised paper health — {product}")
+    table.add_column("metric")
+    table.add_column("value", justify="right")
+    for k in ("session_id", "session_status", "mode", "started_at",
+              "forward_days_completed", "days_remaining", "replay_days_recorded",
+              "last_run_date", "missing_days_gap", "rejected_orders", "broker_errors",
+              "paper_pnl_pct", "benchmark_pnl_pct", "tracking_error_pct_daily",
+              "current_drawdown_pct", "concentration_top_weight", "turnover_per_year",
+              "avg_slippage_bps", "max_reconciliation_drift", "risk_breaches",
+              "data_quality_events", "can_generate_final_report"):
+        table.add_row(k, str(h.get(k)))
+    console.print(table)
+    rules_state = h["stop_rules"]["state"]
+    if h["stop_rules"]["triggered"]:
+        console.print(f"\n[bold]Stop rules: {rules_state}[/bold]")
+        for r in h["stop_rules"]["triggered"]:
+            c = "red" if r["severity"] == "FAILED" else "yellow"
+            console.print(f"  [{c}]{r['severity']}[/] {r['rule']} — {r['detail']}")
+            console.print(f"      [dim]remediation: {r['remediation']}[/dim]")
+    else:
+        console.print("\n[green]Stop rules: none triggered.[/green]")
+    if h.get("stop_reason"):
+        console.print(f"[red]Stop reason:[/red] {h['stop_reason']}")
+    console.print("[bold red]NOT LIVE ELIGIBLE.[/bold red]")
+
+
+@app.command("paper-vs-backtest")
+def paper_vs_backtest_cmd(
+    product: str = typer.Option("long_only_t212", help=" | ".join(SUPERVISED_PRODUCTS)),
+) -> None:
+    """Compare forward paper BEHAVIOUR against backtest expectations (Phase 5).
+
+    Judges operational behaviour (turnover, exposure, holdings, concentration,
+    slippage, rejects); return/alpha metrics are informational on a small sample.
+    Verdict: within / mildly degraded / severely degraded / invalid."""
+    settings, _ = _bootstrap()
+    from app.execution.paper_vs_backtest import compare
+    from app.execution.supervised_paper import SupervisedPaperStore
+
+    store = SupervisedPaperStore(settings.runtime_dir, product)
+    rep = compare(store, product=product)
+    table = Table(title=f"Paper vs backtest — {product} ({rep.forward_days} forward days)")
+    for col in ("metric", "expected", "actual", "status", "kind"):
+        table.add_column(col)
+    sc = {"within": "green", "mildly_degraded": "yellow", "severely_degraded": "red",
+          "not_comparable": "yellow", "informational": "blue"}
+    for r in rep.rows:
+        table.add_row(r.metric, r.expected, str(r.actual),
+                      f"[{sc.get(r.status, 'white')}]{r.status}[/]",
+                      "operational" if r.operational else "informational")
+    console.print(table)
+    for note in rep.notes:
+        console.print(f"[dim]- {note}[/dim]")
+    vc = ("green" if rep.verdict.startswith("within") else
+          "red" if "severely" in rep.verdict or "invalid" in rep.verdict else "yellow")
+    console.print(f"\n[bold]Verdict:[/bold] [{vc}]{rep.verdict}[/]")
+    console.print("[bold red]NOT LIVE ELIGIBLE.[/bold red]")
+
+
+@app.command("supervised-paper-start-report")
+def supervised_paper_start_report() -> None:
+    """Generate SUPERVISED_PAPER_START_REPORT.md (Phase 9).
+
+    Answers the fifteen go/no-go questions and prints a single verdict: ready (or
+    not) to BEGIN a forward supervised shadow/paper period. Live stays blocked."""
+    settings, storage = _bootstrap()
+    from app.config.settings import PROJECT_ROOT
+    from app.research.paper_start_report import build_start_report
+
+    md, ready = build_start_report(settings, storage)
+    out = PROJECT_ROOT / "SUPERVISED_PAPER_START_REPORT.md"
+    out.write_text(md, encoding="utf-8")
+    color = "green" if ready else "yellow"
+    verdict = ("Ready to begin supervised shadow/paper period" if ready else
+               "NOT ready to begin supervised shadow/paper period")
+    console.print(f"[{color}]{verdict}[/]")
+    console.print(f"[green]Report written:[/green] {out}")
+    console.print("[bold red]NOT LIVE ELIGIBLE.[/bold red]")
 
 
 # --------------------------------------------------------------------------------

@@ -22,6 +22,7 @@ const NAV = [
 ];
 
 const PRODUCT_NAV = [
+  { to: "/operator", label: "Operator Paper Mode", icon: "▶" },
   { to: "/product-decision", label: "Product Decision", icon: "◆" },
   { to: "/tradability", label: "Tradability", icon: "▦" },
   { to: "/blockers", label: "Blockers", icon: "⚑" },

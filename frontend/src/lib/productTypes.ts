@@ -123,3 +123,72 @@ export interface PaperFinal {
   checks?: Record<string, boolean>;
   equity_curve?: { date: string; equity: number }[];
 }
+
+export interface StopRule {
+  rule: string;
+  severity: string;
+  detail: string;
+  remediation: string;
+}
+
+export interface PaperHealth {
+  state: string;
+  product?: string;
+  message?: string;
+  session_id?: string;
+  session_status?: string;
+  stop_reason?: string;
+  mode?: string;
+  started_at?: string;
+  min_days?: number;
+  forward_days_completed?: number;
+  days_remaining?: number;
+  replay_days_recorded?: number;
+  last_run_date?: string | null;
+  missing_days_gap?: number;
+  rejected_orders?: number;
+  broker_errors?: number;
+  paper_pnl_pct?: number;
+  benchmark_pnl_pct?: number | null;
+  tracking_error_pct_daily?: number | null;
+  current_drawdown_pct?: number;
+  concentration_top_weight?: number;
+  turnover_per_year?: number;
+  avg_slippage_bps?: number;
+  max_reconciliation_drift?: number;
+  risk_breaches?: number;
+  data_quality_events?: number;
+  can_generate_final_report?: boolean;
+  stop_rules?: { state: string; triggered: StopRule[] };
+  live_eligible?: boolean;
+}
+
+export interface OperatorStatus {
+  product: string;
+  live_eligible: boolean;
+  controls_enabled: boolean;
+  kill_switch_active: boolean;
+  health: PaperHealth;
+  decision: {
+    headline: string; recommended: string; action: string;
+    capital_stage: string; status: string;
+  };
+  trading212: {
+    enabled: boolean; mode: string; api_key_configured: boolean;
+    api_secret_configured: boolean; allow_demo_orders: boolean; live_orders_supported: boolean;
+  };
+  checklist: { item: string; done: boolean; note: string }[];
+  next_action: string;
+  latest_summary: string;
+  confirm_phrase_demo_execute: string;
+}
+
+export interface OperatorRunResult {
+  ok: boolean;
+  refused?: boolean;
+  terminal?: boolean;
+  status_line?: string;
+  next_action?: string;
+  state?: string | null;
+  live_eligible?: boolean;
+}
