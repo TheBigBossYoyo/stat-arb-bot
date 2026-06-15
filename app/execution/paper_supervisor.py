@@ -504,9 +504,11 @@ def operator_checklist(settings, h: dict, decision_status: str,
 # --------------------------------------------------------------------------------
 
 def render_daily_summary(day_info: dict, *, health_state: str, next_action: str,
-                         status_line: str) -> str:
+                         status_line: str, monitor: dict | None = None) -> str:
     """Render the operator's daily summary (Markdown). Structured so it can later
-    be pushed to Telegram/Discord/email without changing the producer."""
+    be pushed to Telegram/Discord/email without changing the producer. When a
+    `monitor` dict is supplied the summary leads with the health score, alert
+    counts and whether tomorrow needs action."""
     weights = day_info.get("target_weights", {})
     top = sorted(weights.items(), key=lambda kv: -kv[1])[:10]
     orders = day_info.get("planned_orders", [])
@@ -519,6 +521,35 @@ def render_daily_summary(day_info: dict, *, health_state: str, next_action: str,
         f"- **Session health**: {health_state}",
         f"- **Result**: {status_line}",
         "",
+    ]
+    if monitor:
+        hs = monitor.get("health_score", {})
+        counts = monitor.get("alert_counts", {})
+        met = monitor.get("metrics", {})
+        # tomorrow needs action while the period is still running, or any alert is open
+        requires_tomorrow = (counts.get("active_total", 0) > 0
+                             or not met.get("can_generate_final_report"))
+        lines += [
+            "## Monitoring",
+            f"- **Session**: {monitor.get('session_id')}",
+            f"- **Health score**: {hs.get('score')} / 100 ({hs.get('classification')})",
+            f"- **Active alerts**: {counts.get('active_total', 0)} "
+            f"(critical {counts.get('critical', 0)}, warning {counts.get('warning', 0)}, "
+            f"info {counts.get('info', 0)})",
+            f"- **Paper return**: {met.get('paper_pnl_pct')}% · "
+            f"**Benchmark**: {met.get('benchmark_pnl_pct')}% · "
+            f"**Excess**: {met.get('excess_return_pct')}ppt",
+            f"- **Drawdown**: {met.get('current_drawdown_pct')}% · "
+            f"**Concentration**: {met.get('concentration_top_weight')} · "
+            f"**Turnover**: {met.get('turnover_per_year')}x/yr",
+            f"- **Skipped/rejected orders**: {met.get('rejected_orders', 0)}",
+            f"- **Next expected run**: {met.get('next_expected_run')}",
+            f"- **Suggested next action**: {monitor.get('suggested_next_action')}",
+            f"- **Tomorrow requires action**: {'YES' if requires_tomorrow else 'no'}",
+            "- **Dashboard**: open the **Paper Monitoring** page (`/paper-monitor`).",
+            "",
+        ]
+    lines += [
         "## Result snapshot",
         f"- Equity: {day_info.get('equity')}",
         f"- Day paper PnL: {day_info.get('paper_pnl_day')}",

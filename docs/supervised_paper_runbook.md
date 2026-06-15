@@ -94,6 +94,9 @@ an empty `.env`.
 | `supervised-paper-final-report --product long_only_t212` | The end-of-period pass/fail report (after ≥30 forward days). |
 | `supervised-paper-stop --product long_only_t212 --reason "..."` | Manually stop the period. |
 | `supervised-paper-preflight` | Final pre-flight check; writes `PAPER_PREFLIGHT_REPORT.md` (Ready / Not-ready). Run **before** you start. |
+| `supervised-paper-monitor --product long_only_t212` | Health score (0–100, explained) + active alerts + suggested next action. |
+| `supervised-paper-reminder --product long_only_t212` | Local nudge: does today need a run? alerts? reports due? Writes `runtime/paper/reminder.txt`. |
+| `paper-monitoring-report` | Writes `PAPER_MONITORING_REPORT.md` + `PAPER_MONITORING_COMPLETION_REPORT.md`. |
 | `supervised-paper-weekly-report --product long_only_t212` | Weekly review; writes `runtime/paper/weekly_report_YYYY-MM-DD.md` (continue / pause / investigate / fail). |
 | `supervised-paper-start-report` | Regenerate `SUPERVISED_PAPER_START_REPORT.md`. |
 | `forward-paper-start-report` | Regenerate `FORWARD_PAPER_START_REPORT.md` (is the forward period running? what's next?). |

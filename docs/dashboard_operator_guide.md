@@ -214,6 +214,28 @@ fully themed in both light and dark mode.
 
 ---
 
-See also: `dashboard_actions.md`, `dashboard_permissions.md`,
+## 12. Paper Monitoring page
+
+The **Paper Monitoring** page (`/paper-monitor`, "Health Monitor" in the sidebar)
+is the quality-control cockpit for the running paper period:
+
+- a **0–100 health score** with its classification (healthy / watch / degraded /
+  failed / paused) and the component breakdown that explains it;
+- every metric (days, PnL vs benchmark, drawdown, concentration, turnover, cash
+  drag, tracking error, stop-rule state);
+- charts: health score, paper-vs-benchmark PnL, concentration, and alerts over
+  time;
+- the **active** and **resolved** alert tables. Resolve a non-critical alert with
+  a note (recorded in the audit trail) — a critical alert whose condition is still
+  active is refused until you fix the cause.
+
+The **Command Center** mirrors the headline: health score, critical/warning alert
+counts, and the next expected run; a critical alert becomes Today's Action. See
+`paper_monitoring.md` and `paper_alert_rules.md` for the full rules.
+
+---
+
+See also: `paper_monitoring.md`, `paper_alert_rules.md`, `dashboard_actions.md`,
+`dashboard_permissions.md`,
 `dashboard_safety_model.md`, `trading212_dashboard_workflow.md`,
 `supervised_paper_dashboard_workflow.md`.

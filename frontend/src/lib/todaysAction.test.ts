@@ -71,4 +71,39 @@ describe("computeTodaysAction priority", () => {
     const a = computeTodaysAction({ ...base, controlsEnabled: false, health: { ...base.health, state: "NOT STARTED" } });
     expect(a.readOnlyNote).toBe(true);
   });
+
+  it("a critical alert outranks the daily run", () => {
+    const a = computeTodaysAction({
+      ...base,
+      health: { ...base.health, last_run_date: "2026-06-13" },
+      alerts: { critical: 1 },
+    });
+    expect(a.key).toBe("critical-alert");
+    expect(a.tone).toBe("danger");
+    expect(a.ctaHref).toBe("/paper-monitor");
+  });
+
+  it("warnings surface once today's run is done", () => {
+    const a = computeTodaysAction({
+      ...base,
+      health: { ...base.health, last_run_date: "2026-06-15" },
+      alerts: { warning: 2 },
+    });
+    expect(a.key).toBe("review-warnings");
+    expect(a.tone).toBe("warn");
+  });
+
+  it("weekly review due once caught up with no alerts", () => {
+    const a = computeTodaysAction({
+      ...base,
+      health: { ...base.health, last_run_date: "2026-06-15" },
+      weeklyDue: true,
+    });
+    expect(a.key).toBe("weekly-due");
+  });
+
+  it("kill switch still outranks a critical alert", () => {
+    const a = computeTodaysAction({ ...base, killSwitchActive: true, alerts: { critical: 3 } });
+    expect(a.key).toBe("kill-switch");
+  });
 });

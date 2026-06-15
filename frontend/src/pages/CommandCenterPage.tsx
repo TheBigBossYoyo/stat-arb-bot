@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { apiGet } from "../lib/api";
 import type { DashboardSummary } from "../lib/actionTypes";
 import type { ProductDecision, PaperFinal } from "../lib/productTypes";
+import { CLASS_TONE } from "../lib/monitorTypes";
 import { Card, Badge, StatusBadge, EmptyState, PageHeader } from "../components/ui";
 import MetricCard from "../components/MetricCard";
 import ActionCard from "../components/ActionCard";
@@ -43,6 +44,7 @@ export default function CommandCenterPage() {
         {(s) => {
           const h = s.health;
           const latestJob = s.jobs[0];
+          const mon = s.monitor;
           const action = computeTodaysAction({
             controlsEnabled: s.controls_enabled,
             killSwitchActive: s.kill_switch_active,
@@ -51,6 +53,8 @@ export default function CommandCenterPage() {
             trading212: s.trading212,
             latestJobFailed: latestJob?.status === "failed",
             nextActionText: s.next_action,
+            alerts: { critical: mon?.alert_counts.critical, warning: mon?.alert_counts.warning },
+            weeklyDue: mon?.weekly_due,
           });
           const product = decision.data?.products.find((p) => p.product === s.product);
           const equity = (paper.data?.equity_curve ?? []).map((r) => ({ ts: r.date, equity: r.equity }));
@@ -102,6 +106,30 @@ export default function CommandCenterPage() {
                   </Badge>}
                   accent={s.kill_switch_active ? "danger" : "ok"} sub="halt control" />
               </div>
+
+              {/* Monitoring row — health score + alerts at a glance. */}
+              {mon && (
+                <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+                  <MetricCard label="Paper health score"
+                    value={<span>{mon.health_score}<span className="text-sm text-zinc-500">/100</span></span>}
+                    accent={mon.classification === "healthy" ? "ok"
+                      : mon.classification === "failed" ? "danger"
+                      : mon.classification === "watch" ? "info" : "warn"}
+                    sub={<Badge tone={CLASS_TONE[mon.classification]}>{mon.classification}</Badge>} />
+                  <MetricCard label="Critical alerts"
+                    value={mon.alert_counts.critical}
+                    accent={mon.alert_counts.critical > 0 ? "danger" : "ok"}
+                    sub={<Link to="/paper-monitor" className="text-sky-400 hover:underline">monitoring →</Link>} />
+                  <MetricCard label="Warning alerts"
+                    value={mon.alert_counts.warning}
+                    accent={mon.alert_counts.warning > 0 ? "warn" : "ok"}
+                    sub={`${mon.alert_counts.active_total} active total`} />
+                  <MetricCard label="Next expected run"
+                    value={<span className="text-base">{mon.ran_today ? "done today" : (mon.next_expected_run ?? "—")}</span>}
+                    accent={mon.missed_days > 0 ? "warn" : "info"}
+                    sub={mon.final_review_ready ? "final review ready" : `${mon.days_remaining_to_min} day(s) to 30`} />
+                </div>
+              )}
 
               {/* Charts + session detail. */}
               <div className="grid gap-4 lg:grid-cols-3">

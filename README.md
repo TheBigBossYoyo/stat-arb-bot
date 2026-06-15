@@ -362,6 +362,9 @@ action_audit,action_schemas}.py`). From the browser you can:
   / **demo execute** day, watching live job progress (Supervised Paper → Control
   Center; `POST /api/paper/start`, `/api/paper/daily`);
 - run the **Trading 212 demo setup wizard** (`/api/trading212/setup-check`);
+- watch the **Paper Monitoring** page — a 0–100 health score (explained), alerts
+  with audited resolution, and score/PnL/concentration/alert trend charts
+  (`/api/paper/health`, `/api/paper/alerts`);
 - preview orders (shadow), generate the **final report**, **stop** the session;
 - rerun **product decision / concentration / survivorship / crisis / readiness**;
 - open/download every report in the **Reports Library**;

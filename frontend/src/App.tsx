@@ -24,7 +24,7 @@ import SurvivorshipPage from "./pages/SurvivorshipPage";
 import LongOnlyPaperSetupPage from "./pages/LongOnlyPaperSetupPage";
 import Trading212OrderPreviewPage from "./pages/Trading212OrderPreviewPage";
 import Trading212SetupPage from "./pages/Trading212SetupPage";
-import SupervisedPaperMonitorPage from "./pages/SupervisedPaperMonitorPage";
+import PaperMonitoringPage from "./pages/PaperMonitoringPage";
 import SupervisedPaperPage from "./pages/SupervisedPaperPage";
 import OperatorPaperModePage from "./pages/OperatorPaperModePage";
 import ReportsLibraryPage from "./pages/ReportsLibraryPage";
@@ -49,7 +49,7 @@ export default function App() {
         {/* Supervised Paper */}
         <Route path="/supervised-paper" element={<SupervisedPaperPage />} />
         <Route path="/operator" element={<OperatorPaperModePage />} />
-        <Route path="/paper-monitor" element={<SupervisedPaperMonitorPage />} />
+        <Route path="/paper-monitor" element={<PaperMonitoringPage />} />
         <Route path="/paper-setup" element={<LongOnlyPaperSetupPage />} />
 
         {/* Broker */}

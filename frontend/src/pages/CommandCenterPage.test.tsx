@@ -34,4 +34,27 @@ describe("CommandCenterPage", () => {
     expect((await screen.findAllByText(/not live eligible/i)).length).toBeGreaterThan(0);
     expect(screen.queryByRole("button", { name: /go live|run live|enable live/i })).toBeNull();
   });
+
+  it("shows the paper health score card when a session is active", async () => {
+    installFetch({
+      "/api/dashboard/summary": {
+        ...summary,
+        health: { ...summary.health, state: "IN PROGRESS", last_run_date: "2026-06-15",
+          forward_days_completed: 8, days_remaining: 22 },
+        monitor: {
+          health_score: 88, classification: "healthy",
+          alert_counts: { critical: 0, warning: 1, info: 0, active_total: 1, resolved_total: 0 },
+          next_expected_run: "2026-06-16", missed_days: 0, weekly_due: false,
+          final_review_ready: false, days_remaining_to_min: 22, days_remaining_to_target: 82,
+          ran_today: true, suggested_next_action: "review warnings",
+        },
+      },
+      "/api/product-decision": decision,
+      "/api/paper-final/": { available: false },
+    });
+    renderWithProviders(<CommandCenterPage />);
+    expect(await screen.findByText("Paper health score")).toBeInTheDocument();
+    expect(screen.getByText("Critical alerts")).toBeInTheDocument();
+    expect(screen.getByText("Warning alerts")).toBeInTheDocument();
+  });
 });

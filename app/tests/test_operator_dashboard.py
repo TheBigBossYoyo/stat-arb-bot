@@ -74,3 +74,60 @@ def test_run_shadow_with_controls_invokes_runner(tmp_path, monkeypatch):
     assert body["ok"] is True
     assert body["live_eligible"] is False
     assert body["status_line"] == "Shadow day recorded successfully."
+
+
+# ---- paper monitoring + alerts endpoints --------------------------------------
+
+def _seed_info_alert(settings):
+    from app.research.paper_alerts import AlertStore, evaluate_alert_specs
+    store = AlertStore(settings.runtime_dir, "long_only_t212")
+    specs = evaluate_alert_specs({"can_generate_final_report": True})
+    alerts = store.sync(specs, session_id="S1", now="2026-06-15T00:00:00")
+    return store, alerts[0]
+
+
+def test_paper_health_endpoint_read_only(tmp_path):
+    client, _, _ = make_client(tmp_path)
+    r = client.get("/api/paper/health?product=long_only_t212")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["live_eligible"] is False
+    assert body["active"] is False          # no session in a fresh runtime
+
+
+def test_paper_alerts_endpoint_lists_counts(tmp_path):
+    client, settings, _ = make_client(tmp_path)
+    _seed_info_alert(settings)
+    r = client.get("/api/paper/alerts?product=long_only_t212")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["counts"]["active_total"] == 1
+    assert any(a["category"] == "final_review_ready" for a in body["alerts"])
+
+
+def test_paper_alert_resolve_requires_controls(tmp_path):
+    client, settings, _ = make_client(tmp_path, controls=False)
+    _store, alert = _seed_info_alert(settings)
+    r = client.post(f"/api/paper/alerts/{alert.alert_id}/resolve",
+                    json={"confirm_phrase": "", "reason": "seen"})
+    assert r.status_code == 403
+
+
+def test_paper_alert_resolve_requires_note(tmp_path):
+    client, settings, _ = make_client(tmp_path, controls=True)
+    _store, alert = _seed_info_alert(settings)
+    r = client.post(f"/api/paper/alerts/{alert.alert_id}/resolve",
+                    json={"confirm_phrase": "", "reason": ""})
+    assert r.status_code == 400
+
+
+def test_paper_alert_resolve_succeeds_and_audits(tmp_path):
+    client, settings, storage = make_client(tmp_path, controls=True)
+    store, alert = _seed_info_alert(settings)
+    r = client.post(f"/api/paper/alerts/{alert.alert_id}/resolve",
+                    json={"confirm_phrase": "", "reason": "reviewed and acknowledged"})
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+    assert store.get(alert.alert_id).resolved is True
+    events = storage.load_audit_events(limit=20)
+    assert any(e.action == "paper_alert_resolve" for e in events)

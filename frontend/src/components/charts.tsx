@@ -186,6 +186,30 @@ export function ContributionChart({ data, height = 220, unit = "%" }: {
   );
 }
 
+/** Generic themed multi-line time series (monitoring snapshots). */
+export function MultiLineChart({ data, xKey, series, height = 200, unit = "", yDomain }: {
+  data: Record<string, unknown>[]; xKey: string;
+  series: { key: string; label: string; color: string }[];
+  height?: number; unit?: string; yDomain?: [number | string, number | string];
+}) {
+  const { axis, grid, tooltip } = useChartTheme();
+  return (
+    <ResponsiveContainer width="100%" height={height}>
+      <LineChart data={data}>
+        <CartesianGrid {...grid} />
+        <XAxis dataKey={xKey} tickFormatter={(v: string) => String(v).slice(5)} {...axis} minTickGap={40} />
+        <YAxis {...axis} width={48} domain={yDomain ?? ["auto", "auto"]}
+          tickFormatter={unit ? (v: number) => `${v}${unit}` : undefined} />
+        <Tooltip {...tooltip} />
+        {series.map((s) => (
+          <Line key={s.key} type="monotone" dataKey={s.key} name={s.label}
+            stroke={s.color} strokeWidth={1.5} dot={false} connectNulls />
+        ))}
+      </LineChart>
+    </ResponsiveContainer>
+  );
+}
+
 /** Per-scenario drawdown bars (crisis / survivorship). More negative = worse. */
 export function ScenarioDrawdownChart({ data, height = 260, threshold = -45 }: {
   data: { scenario: string; dd: number }[]; height?: number; threshold?: number;

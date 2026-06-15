@@ -1,5 +1,6 @@
 // Types for the dashboard action/job orchestrator (backend app/dashboard/jobs.py).
 import type { PaperHealth, Trading212Config } from "./productTypes";
+import type { MonitorCard } from "./monitorTypes";
 
 export type JobStatus =
   | "queued" | "running" | "succeeded" | "failed" | "refused" | "cancelled";
@@ -64,6 +65,7 @@ export interface DashboardSummary {
     capital_stage: string; status: string;
   };
   health: PaperHealth;
+  monitor: MonitorCard | null;
   next_action: string;
   trading212: Trading212Config;
   reports: ReportMeta[];

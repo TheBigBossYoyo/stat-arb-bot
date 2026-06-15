@@ -3734,11 +3734,21 @@ def run_supervised_paper_daily(settings, storage, *, product: str, mode: str,
 
     state = h["state"]
     next_action = _supervised_next_action(state, product, mode, h.get("days_remaining", 0))
+
+    # --- run the monitoring engine (alerts + health score + snapshot) ---
+    from app.research.paper_monitor import run_monitor
+    last_bar = prices.close.index[-1]
+    last_bar_date = str(getattr(last_bar, "date", lambda: last_bar)())[:10]
+    monitor = run_monitor(settings, storage, product=product, min_days=session.min_days,
+                          target_days=session.target_days, data_stale=res.get("data_stale"),
+                          last_bar_date=last_bar_date).as_dict()
+
     md = render_daily_summary(day_info, health_state=state, next_action=next_action,
-                              status_line=status_line)
+                              status_line=status_line, monitor=monitor)
     summary_path = write_daily_summary(settings.runtime_dir, md)
     res.update(day_info=day_info, stop_rules=rules.as_dict(), state=state, health=h,
-               status_line=status_line, next_action=next_action, summary_path=str(summary_path))
+               status_line=status_line, next_action=next_action, summary_path=str(summary_path),
+               monitor=monitor)
     return res
 
 
@@ -4013,6 +4023,102 @@ def forward_paper_start_report() -> None:
         console.print("[yellow]B. Forward supervised paper period not started "
                       "(see report for the reason).[/yellow]")
     console.print(f"[green]Report written:[/green] {out}")
+    console.print("[bold red]NOT LIVE ELIGIBLE.[/bold red]")
+
+
+@app.command("supervised-paper-monitor")
+def supervised_paper_monitor(
+    product: str = typer.Option("long_only_t212", help=" | ".join(SUPERVISED_PRODUCTS)),
+    min_days: int = typer.Option(30),
+) -> None:
+    """Monitoring view: health score (0-100, explained), classification + alerts.
+
+    Evaluates the active session, persists alerts + a health snapshot, and prints
+    the score with its component breakdown, the active alerts, and the single
+    suggested next action. Live is never in scope."""
+    settings, storage = _bootstrap()
+    from app.research.paper_monitor import run_monitor
+
+    res = run_monitor(settings, storage, product=product, min_days=min_days).as_dict()
+    if not res["active"]:
+        console.print(f"[yellow]{res['metrics'].get('message', 'no session')}[/yellow]")
+        raise typer.Exit(1)
+    hs = res["health_score"]
+    cls_color = {"healthy": "green", "watch": "blue", "degraded": "yellow",
+                 "failed": "red", "paused": "yellow"}.get(hs["classification"], "white")
+    console.print(f"[bold]Health score:[/bold] [{cls_color}]{hs['score']}/100 "
+                  f"({hs['classification'].upper()})[/]")
+    if hs["overrides"]:
+        console.print("[red]Overrides:[/red] " + "; ".join(hs["overrides"]))
+    table = Table(title="Score components")
+    for col in ("component", "score", "weight", "detail"):
+        table.add_column(col)
+    for c in hs["components"]:
+        table.add_row(c["name"], str(c["score"]), str(c["weight"]), c["detail"])
+    console.print(table)
+    counts = res["alert_counts"]
+    console.print(f"\n[bold]Alerts:[/bold] {counts['active_total']} active "
+                  f"(critical {counts['critical']}, warning {counts['warning']}, "
+                  f"info {counts['info']}); {counts['resolved_total']} resolved")
+    for a in res["alerts"]:
+        if a["resolved"]:
+            continue
+        c = {"critical": "red", "warning": "yellow"}.get(a["severity"], "blue")
+        console.print(f"  [{c}]{a['severity'].upper()}[/] {a['category']} — {a['title']}")
+        console.print(f"      [dim]{a['suggested_action']}[/dim]")
+    console.print(f"\n[bold]Suggested next action:[/bold] {res['suggested_next_action']}")
+    console.print("[bold red]NOT LIVE ELIGIBLE.[/bold red]")
+
+
+@app.command("paper-monitoring-report")
+def paper_monitoring_report() -> None:
+    """Generate PAPER_MONITORING_REPORT.md + PAPER_MONITORING_COMPLETION_REPORT.md.
+
+    Reads the live monitoring engine and answers the operator questions, ending with
+    the completion verdict (A: monitoring active / B: not ready). Live stays blocked."""
+    settings, storage = _bootstrap()
+    from app.config.settings import PROJECT_ROOT
+    from app.research.paper_monitoring_report import (
+        build_completion_report,
+        build_monitoring_report,
+    )
+
+    md = build_monitoring_report(settings, storage)
+    out1 = PROJECT_ROOT / "PAPER_MONITORING_REPORT.md"
+    out1.write_text(md, encoding="utf-8")
+    comp, ready = build_completion_report(settings, storage)
+    out2 = PROJECT_ROOT / "PAPER_MONITORING_COMPLETION_REPORT.md"
+    out2.write_text(comp, encoding="utf-8")
+    if ready:
+        console.print("[green]A. Paper monitoring is active; continue daily forward "
+                      "paper validation.[/green]")
+    else:
+        console.print("[yellow]B. Paper monitoring not ready (see report).[/yellow]")
+    console.print(f"[green]Reports written:[/green] {out1.name}, {out2.name}")
+    console.print("[bold red]NOT LIVE ELIGIBLE.[/bold red]")
+
+
+@app.command("supervised-paper-reminder")
+def supervised_paper_reminder(
+    product: str = typer.Option("long_only_t212", help=" | ".join(SUPERVISED_PRODUCTS)),
+    min_days: int = typer.Option(30),
+    write: bool = typer.Option(True, help="also write runtime/paper/reminder.txt"),
+) -> None:
+    """Local reminder: does today need a paper run? which mode? any alerts/reports due?
+
+    Writes a plain-text reminder file (no external messaging). Use it from a local
+    scheduler (Task Scheduler / cron) if you want a daily nudge."""
+    settings, storage = _bootstrap()
+    from app.research.paper_reminder import build_reminder, write_reminder_file
+
+    rem = build_reminder(settings, storage, product=product, min_days=min_days)
+    head = "[green]" if not rem["needs_attention"] else "[yellow]"
+    console.print(f"{head}{rem['headline']}[/]")
+    for line in rem["lines"]:
+        console.print(f"  - {line}")
+    if write:
+        path = write_reminder_file(settings, rem)
+        console.print(f"[dim]Reminder written to {path}[/dim]")
     console.print("[bold red]NOT LIVE ELIGIBLE.[/bold red]")
 
 

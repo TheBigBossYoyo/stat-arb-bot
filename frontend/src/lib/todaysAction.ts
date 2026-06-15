@@ -24,6 +24,10 @@ export interface TodaysActionInput {
   trading212: { enabled: boolean; api_key_configured: boolean; allow_demo_orders: boolean };
   latestJobFailed?: boolean;
   nextActionText?: string;
+  /** Monitoring alert counts (active). Drives the critical/warning priority rules. */
+  alerts?: { critical?: number; warning?: number };
+  /** A weekly review report is due. */
+  weeklyDue?: boolean;
   /** Override "today" (UTC yyyy-mm-dd) for deterministic tests. */
   todayUtc?: string;
 }
@@ -72,6 +76,20 @@ export function computeTodaysAction(input: TodaysActionInput): TodaysAction {
       tone: "danger",
       ctaLabel: "Review product decision",
       ctaHref: "/product-decision",
+    };
+  }
+
+  // 2b) An active CRITICAL monitoring alert (other than the kill-switch / product
+  // cases handled above) takes priority over everything operational.
+  if ((input.alerts?.critical ?? 0) > 0) {
+    return {
+      key: "critical-alert",
+      eyebrow: "Critical alert",
+      title: "Resolve the critical paper alert",
+      detail: `${input.alerts?.critical} critical alert(s) are active on the paper session. Open Paper Monitoring to see the cause and the suggested fix. Critical alerts cannot be dismissed until the underlying issue is fixed.`,
+      tone: "danger",
+      ctaLabel: "Open Paper Monitoring",
+      ctaHref: "/paper-monitor",
     };
   }
 
@@ -142,6 +160,31 @@ export function computeTodaysAction(input: TodaysActionInput): TodaysAction {
 
   // 7) Active session — already ran today?
   if (h.last_run_date && h.last_run_date === today) {
+    // 7a) warnings to review (no run needed — today is done)
+    if ((input.alerts?.warning ?? 0) > 0) {
+      return {
+        key: "review-warnings",
+        eyebrow: "Review",
+        title: "Review the open warning alert(s)",
+        detail: `Today's paper day is recorded, but ${input.alerts?.warning} warning alert(s) are open. Review them on Paper Monitoring and resolve with a note once understood.`,
+        tone: "warn",
+        ctaLabel: "Open Paper Monitoring",
+        ctaHref: "/paper-monitor",
+      };
+    }
+    // 7b) a weekly review is due
+    if (input.weeklyDue) {
+      return {
+        key: "weekly-due",
+        eyebrow: "Weekly review",
+        title: "Generate this week's review report",
+        detail: "Today's paper day is recorded and a weekly review is due. Generate the weekly report to capture the week's health, alerts and recommendation.",
+        tone: "info",
+        ctaLabel: "Open Paper Monitoring",
+        ctaHref: "/paper-monitor",
+        readOnlyNote: !input.controlsEnabled,
+      };
+    }
     return {
       key: "done-today",
       eyebrow: "All caught up",

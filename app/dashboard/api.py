@@ -467,6 +467,79 @@ def create_app(settings: Settings | None = None, storage: Storage | None = None,
         return {"available": True, "live_eligible": False,
                 "report": out.name, **rep.as_dict()}
 
+    # ---- paper monitoring + alerts (Phase 5) -------------------------------------
+
+    @app.get("/api/paper/health", dependencies=dep)
+    def paper_health(product: str = "long_only_t212", min_days: int = 30):
+        """Full monitoring view (read-only): health score, metrics, alerts, pvb."""
+        from app.research.paper_monitor import load_snapshots, run_monitor
+
+        res = run_monitor(settings, storage, product=product, min_days=min_days,
+                          persist=False).as_dict()
+        res["snapshots"] = load_snapshots(settings.runtime_dir, product)
+        return res
+
+    @app.post("/api/paper/health/run", dependencies=dep)
+    def paper_health_run(body: ConfirmedAction, product: str = "long_only_t212",
+                         min_days: int = 30):
+        """Run the monitoring engine and PERSIST (records a snapshot + syncs alerts)."""
+        require_role(settings, Role.TRADER)
+        from app.research.paper_monitor import run_monitor
+
+        res = run_monitor(settings, storage, product=product, min_days=min_days,
+                          persist=True).as_dict()
+        record_audit("paper_health_run", True, {"product": product},
+                     f"score={res.get('health_score', {}).get('score')}")
+        return res
+
+    @app.get("/api/paper/alerts", dependencies=dep)
+    def paper_alerts(product: str = "long_only_t212", include_resolved: bool = True):
+        """Persisted alerts (active + resolved history) with counts."""
+        from app.research.paper_alerts import CRITICAL, WARNING, AlertStore
+
+        store = AlertStore(settings.runtime_dir, product)
+        alerts = store.load()
+        active = [a for a in alerts if not a.resolved]
+        out = alerts if include_resolved else active
+        return {
+            "live_eligible": False,
+            "alerts": [a.as_dict() for a in sorted(out, key=lambda a: a.timestamp, reverse=True)],
+            "counts": {
+                "critical": sum(1 for a in active if a.severity == CRITICAL),
+                "warning": sum(1 for a in active if a.severity == WARNING),
+                "info": sum(1 for a in active if a.severity not in (CRITICAL, WARNING)),
+                "active_total": len(active),
+                "resolved_total": sum(1 for a in alerts if a.resolved),
+            },
+        }
+
+    @app.post("/api/paper/alerts/{alert_id}/resolve", dependencies=dep)
+    def paper_alert_resolve(alert_id: str, body: ConfirmedAction,
+                            product: str = "long_only_t212"):
+        """Resolve a non-critical alert with a note (audited). A CRITICAL alert
+        whose condition is still active cannot be dismissed — fix the cause."""
+        require_role(settings, Role.TRADER)
+        note = (body.reason or "").strip()
+        if not note:
+            raise HTTPException(400, "a resolution note (reason) is required")
+        from app.core.types import utc_now
+        from app.research.paper_alerts import CRITICAL, AlertStore, evaluate_alert_specs
+        from app.research.paper_monitor import run_monitor
+
+        # current active critical conditions block manual dismissal
+        mon = run_monitor(settings, storage, product=product, persist=False).as_dict()
+        specs = evaluate_alert_specs(mon.get("metrics", {}))
+        blocked = {s.dedup_key for s in specs if s.severity == CRITICAL}
+
+        store = AlertStore(settings.runtime_dir, product)
+        now = utc_now().replace(tzinfo=None).isoformat()
+        ok, msg = store.resolve(alert_id, note=note, now=now, blocked_keys=blocked)
+        record_audit("paper_alert_resolve", ok,
+                     {"alert_id": alert_id, "product": product, "note": note}, msg)
+        if not ok:
+            raise HTTPException(409 if "still active" in msg or "already" in msg else 404, msg)
+        return {"ok": True, "alert_id": alert_id, "result": msg, "live_eligible": False}
+
     @app.get("/api/jobs", dependencies=dep)
     def jobs():
         return service.list_jobs()
@@ -602,6 +675,7 @@ def create_app(settings: Settings | None = None, storage: Storage | None = None,
         today's action, broker status, kill switch, latest reports + jobs."""
         from app.cli.main import _supervised_next_action
         from app.execution.paper_supervisor import health_for, product_status
+        from app.research.paper_monitor import run_monitor
         from app.research.product_decision import evaluate_products
 
         h = health_for(settings, storage, product=product)
@@ -611,6 +685,24 @@ def create_app(settings: Settings | None = None, storage: Storage | None = None,
                        _supervised_next_action(h["state"], product,
                                                h.get("mode", "shadow"),
                                                h.get("days_remaining", 0)))
+        # compact monitoring summary for the Command Center health card
+        monitor_card = None
+        if h.get("state") != "NOT STARTED":
+            mon = run_monitor(settings, storage, product=product, persist=False).as_dict()
+            met = mon.get("metrics", {})
+            monitor_card = {
+                "health_score": mon["health_score"]["score"],
+                "classification": mon["health_score"]["classification"],
+                "alert_counts": mon["alert_counts"],
+                "next_expected_run": met.get("next_expected_run"),
+                "missed_days": met.get("missed_days"),
+                "weekly_due": met.get("weekly_due"),
+                "final_review_ready": met.get("final_review_ready"),
+                "days_remaining_to_min": met.get("days_remaining_to_min"),
+                "days_remaining_to_target": met.get("days_remaining_to_target"),
+                "ran_today": met.get("ran_today"),
+                "suggested_next_action": mon.get("suggested_next_action"),
+            }
         return {
             "live_eligible": False,
             "controls_enabled": settings.dashboard_controls_enabled,
@@ -620,6 +712,7 @@ def create_app(settings: Settings | None = None, storage: Storage | None = None,
                          "action": d.action, "capital_stage": d.capital_stage,
                          "status": decision_status},
             "health": h,
+            "monitor": monitor_card,
             "next_action": next_action,
             "trading212": trading212_config_view(),
             "reports": list_reports(settings)[:8],
@@ -706,11 +799,6 @@ def create_app(settings: Settings | None = None, storage: Storage | None = None,
         if job_type is None:
             raise HTTPException(400, "params.mode must be shadow | demo_preview | demo_execute")
         return _submit(job_type, body)
-
-    @app.get("/api/paper/health", dependencies=dep)
-    def paper_health(product: str = "long_only_t212", min_days: int = 30):
-        from app.execution.paper_supervisor import health_for
-        return health_for(settings, storage, product=product, min_days=min_days)
 
     @app.post("/api/paper/final-report", dependencies=dep)
     def paper_final_report(body: ActionBody):
