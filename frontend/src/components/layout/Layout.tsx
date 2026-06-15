@@ -9,6 +9,7 @@ import { useUi } from "../../store/ui";
 import { Badge } from "../ui";
 import { Icons, type IconKey } from "../icons";
 import KillSwitchControl from "../KillSwitch";
+import ThemeToggle from "../ui/ThemeToggle";
 
 interface NavItem { to: string; label: string; icon: IconKey }
 interface NavSection { title: string; icon: IconKey; items: NavItem[] }
@@ -177,8 +178,8 @@ export default function Layout({ children }: { children: ReactNode }) {
       <div className="pointer-events-none fixed bottom-4 right-4 z-50 flex w-80 flex-col gap-2">
         {toasts.map((t) => (
           <div key={t.id} className={`fade-in pointer-events-auto rounded-lg border px-3 py-2 text-sm pop-elevated ${
-            t.kind === "error" ? "border-red-500/40 bg-red-950 text-red-200"
-            : t.kind === "success" ? "border-emerald-500/40 bg-emerald-950 text-emerald-200"
+            t.kind === "error" ? "border-red-500/40 bg-red-500/10 text-red-700 dark:bg-red-950 dark:text-red-200"
+            : t.kind === "success" ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-200"
             : "border-zinc-700 bg-zinc-900 text-zinc-200"
           }`}>
             {t.text}
@@ -224,6 +225,7 @@ function TopBar({ status, summary, wsStatus }: {
         }`} />
         <span className="hidden sm:inline">{wsStatus}</span>
         <span className="mono">{status ? new Date(status.server_time).toISOString().slice(11, 19) : "--:--:--"} UTC</span>
+        <ThemeToggle />
       </div>
     </header>
   );
@@ -239,7 +241,7 @@ function ModeBanner({ status }: { status: SystemStatus | undefined | null }) {
     );
   }
   return (
-    <div className="border-b border-emerald-900/50 bg-emerald-950/40 px-4 py-1.5 text-center text-xs font-medium text-emerald-400">
+    <div className="border-b border-emerald-500/30 bg-emerald-500/10 px-4 py-1.5 text-center text-xs font-medium text-emerald-700 dark:border-emerald-900/50 dark:bg-emerald-950/40 dark:text-emerald-400">
       {status.mode.toUpperCase()} MODE — no real orders can be placed
     </div>
   );

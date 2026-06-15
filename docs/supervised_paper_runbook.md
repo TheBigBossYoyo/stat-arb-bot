@@ -93,7 +93,15 @@ an empty `.env`.
 | `supervised-paper-daily-report --product long_only_t212` | Re-print the most recent recorded day. |
 | `supervised-paper-final-report --product long_only_t212` | The end-of-period pass/fail report (after ≥30 forward days). |
 | `supervised-paper-stop --product long_only_t212 --reason "..."` | Manually stop the period. |
+| `supervised-paper-preflight` | Final pre-flight check; writes `PAPER_PREFLIGHT_REPORT.md` (Ready / Not-ready). Run **before** you start. |
+| `supervised-paper-weekly-report --product long_only_t212` | Weekly review; writes `runtime/paper/weekly_report_YYYY-MM-DD.md` (continue / pause / investigate / fail). |
 | `supervised-paper-start-report` | Regenerate `SUPERVISED_PAPER_START_REPORT.md`. |
+| `forward-paper-start-report` | Regenerate `FORWARD_PAPER_START_REPORT.md` (is the forward period running? what's next?). |
+
+> **One forward day per calendar day.** `supervised-paper-daily` records at most
+> one forward day per day. Run it twice and the second run says *"Today's paper
+> day is already completed — no duplicate recorded"* and changes nothing. Pass
+> `--force` only if you genuinely must record a second day.
 
 ### What `supervised-paper-daily` does, step by step
 1. Loads the current strategy config.

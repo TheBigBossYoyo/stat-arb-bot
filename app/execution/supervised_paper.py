@@ -21,6 +21,7 @@ actually elapse. Live is never in scope here.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -44,15 +45,35 @@ class PaperSession:
     stop_reason: str = ""
     created_at: str = ""
     human_interventions: list[str] = field(default_factory=list)
+    # provenance (stamped once on the first recorded day; defaults keep old
+    # session.json files loadable since missing keys fall back to these)
+    target_days: int = 90
+    strategy_version: str = ""
+    config_hash: str = ""
+    data_snapshot: str = ""
+    dashboard_version: str = ""
+    readiness_report_id: str = ""
+    operator_notes: str = ""
 
     @staticmethod
-    def new(product: str, mode: str, *, min_days: int, starting_cash: float) -> PaperSession:
+    def new(product: str, mode: str, *, min_days: int, starting_cash: float,
+            target_days: int = 90, operator_notes: str = "") -> PaperSession:
         now = utc_now().replace(tzinfo=None)
         return PaperSession(
             session_id=f"PS-{now:%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}",
             product=product, mode=mode, started_at=now.date().isoformat(),
-            min_days=min_days, starting_cash=starting_cash,
-            created_at=now.isoformat())
+            min_days=min_days, starting_cash=starting_cash, target_days=target_days,
+            operator_notes=operator_notes, created_at=now.isoformat())
+
+    @property
+    def has_provenance(self) -> bool:
+        return bool(self.config_hash)
+
+
+def compute_config_hash(payload: dict) -> str:
+    """Stable short hash of a strategy/config payload (provenance stamping)."""
+    blob = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()[:16]
 
 
 class SupervisedPaperStore:

@@ -122,7 +122,45 @@ A shared, intentional system rather than per-page ad-hoc styling:
 * A couple of charts (benchmark overlay, monthly PnL contribution) are wired in the
   component library but not yet surfaced on every page that could use them.
 
+## Theme system (dark + light + system)
+
+A follow-up sprint added a complete light theme and a theme system without
+rewriting the page-level markup:
+
+* **Tokens & provider.** `theme/theme.ts` (pure helpers), `theme/ThemeProvider.tsx`
+  (context + OS-preference listener), `theme/useTheme.ts` (hook), and
+  `components/ui/ThemeToggle.tsx` (top-bar toggle). Preference (`dark` / `light` /
+  `system`) persists to `localStorage` under `statarb.theme`; an inline script in
+  `index.html` applies it before first paint (no flash).
+* **Semantic tokens.** `index.css` registers `--background`, `--foreground`,
+  `--card`, `--muted`, `--muted-foreground`, `--border`, `--success`, `--warning`,
+  `--danger`, `--info` and `--chart-1..6` via Tailwind v4 `@theme inline`, defined
+  for both themes.
+* **Scale remap (the key idea).** Rather than editing 50 pages, light mode REMAPS
+  the existing Tailwind `zinc` neutral ramp (inverted: dark surfaces → light, light
+  text → dark) and darkens the accent *text* shades (200–400) so accent text stays
+  readable on the pale `/15`–`/20` tints. Because Tailwind v4 utilities resolve
+  `var(--color-*)`, redefining those variables under `.light` flips the whole UI
+  consistently from one place.
+* **Charts.** `useChartTheme()` reads themed CSS variables for axis/grid/tooltip
+  chrome so every recharts chart is legible on both backgrounds; data hues were
+  chosen to read on light and dark.
+* **Class-based `dark:`.** `@custom-variant dark (&:where(.dark, .dark *))` lets the
+  few components that need a genuinely different per-theme treatment (solid toasts,
+  the paper-mode banner) opt in explicitly.
+* **Safety preserved.** `NOT LIVE ELIGIBLE`, the kill-switch state, the live-trading
+  banner and demo/shadow banners stay high-contrast in both themes; danger/refused
+  styling stays distinct; there is no live control in either theme.
+
+### Remaining theme polish
+
+* The semantic `bg-card` / `text-muted-foreground` utilities are registered but
+  most surfaces still flow through the (themed) `zinc` classes; future pages can
+  adopt the semantic tokens directly.
+* Light mode targets the same 1440px/laptop desktop focus as the dark redesign.
+
 ## Verification
 
-* `npm run typecheck` ✅ · `npm run test:run` ✅ (28) · `npm run build` ✅
-* `pytest` ✅ (full suite) · `ruff check .` ✅
+* `npm run typecheck` ✅ · `npm run test:run` ✅ (41, incl. 13 theme tests) ·
+  `npm run build` ✅
+* `pytest` ✅ (353) · `ruff check .` ✅

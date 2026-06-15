@@ -51,6 +51,33 @@ Everything below is done **in the browser**.
 7. After the minimum forward days, click **Generate final report**. It refuses to
    PASS early and never asserts live eligibility.
 
+## Exactly what to do every trading day
+
+1. Open the dashboard.
+2. Go to **Command Center**.
+3. Read **Today's Action**.
+4. Click **Run Shadow Day** (or **Run Demo Preview**).
+5. Wait for the job to complete.
+6. Review the daily report.
+7. Check **Safety Center**.
+8. Stop.
+
+If the Command Center says *"Today's paper day is already completed"*, you're done
+— the system records at most one forward day per calendar day.
+
+## Switching theme
+
+The top bar has a **theme toggle** (next to the clock) that cycles:
+
+- **Dark** — the default dark theme.
+- **Light** — the premium light theme.
+- **System** — follows your operating system's light/dark preference, live.
+
+Your choice is stored in the browser (`localStorage` key `statarb.theme`) and
+persists across restarts. **The theme choice does not affect trading logic or any
+safety gate** — `NOT LIVE ELIGIBLE`, the kill switch, and the demo/shadow banners
+stay clearly visible in both themes, and there is no live-trading control in either.
+
 ## What is impossible from the dashboard
 
 - Placing a **live order** — there is no endpoint, no button, no job type for it.

@@ -440,6 +440,33 @@ def create_app(settings: Settings | None = None, storage: Storage | None = None,
         return compare(SupervisedPaperStore(settings.runtime_dir, product),
                        product=product).as_dict()
 
+    @app.get("/api/operator/preflight", dependencies=dep)
+    def operator_preflight():
+        """Final pre-flight check (read-only); also writes PAPER_PREFLIGHT_REPORT.md."""
+        from app.config.settings import PROJECT_ROOT
+        from app.research.paper_preflight import build_preflight_report
+
+        md, res = build_preflight_report(settings, storage)
+        out = PROJECT_ROOT / "PAPER_PREFLIGHT_REPORT.md"
+        out.write_text(md, encoding="utf-8")
+        return {"ready": res.ready, "live_eligible": False,
+                "checks": [{"name": c.name, "ok": c.ok, "detail": c.detail}
+                           for c in res.checks],
+                "blockers": res.blockers, "report": out.name}
+
+    @app.get("/api/operator/weekly-report", dependencies=dep)
+    def operator_weekly_report(product: str = "long_only_t212", as_of: str | None = None):
+        """Weekly review report (read-only); writes runtime/paper/weekly_report_*.md."""
+        from app.execution.supervised_paper import SupervisedPaperStore
+        from app.research.paper_weekly_report import write_weekly_report
+
+        store = SupervisedPaperStore(settings.runtime_dir, product)
+        if store.current_session() is None:
+            return {"available": False, "message": "no session — run supervised-paper-start"}
+        out, rep = write_weekly_report(settings, store, storage=storage, as_of=as_of)
+        return {"available": True, "live_eligible": False,
+                "report": out.name, **rep.as_dict()}
+
     @app.get("/api/jobs", dependencies=dep)
     def jobs():
         return service.list_jobs()

@@ -3,14 +3,17 @@ import { vi } from "vitest";
 import { render } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
+import { ThemeProvider } from "../theme/ThemeProvider";
 
-/** Render a component tree with router + react-query, retries disabled. */
+/** Render a component tree with theme + router + react-query, retries disabled. */
 export function renderWithProviders(ui: ReactNode, { route = "/" }: { route?: string } = {}) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
-    <QueryClientProvider client={qc}>
-      <MemoryRouter initialEntries={[route]}>{ui}</MemoryRouter>
-    </QueryClientProvider>,
+    <ThemeProvider>
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={[route]}>{ui}</MemoryRouter>
+      </QueryClientProvider>
+    </ThemeProvider>,
   );
 }
 

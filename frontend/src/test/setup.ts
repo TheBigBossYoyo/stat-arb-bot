@@ -13,3 +13,19 @@ class MockWebSocket {
 }
 // @ts-expect-error test stub for jsdom
 globalThis.WebSocket = MockWebSocket;
+
+// jsdom has no matchMedia; the theme system queries it for the system preference.
+// Default to a dark OS preference so tests are deterministic. Individual tests may
+// override window.matchMedia to assert system-mode behaviour.
+if (typeof window !== "undefined" && typeof window.matchMedia !== "function") {
+  window.matchMedia = ((query: string) => ({
+    matches: false, // "(prefers-color-scheme: light)" => false => dark
+    media: query,
+    onchange: null,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    addListener: () => {},
+    removeListener: () => {},
+    dispatchEvent: () => false,
+  })) as unknown as typeof window.matchMedia;
+}

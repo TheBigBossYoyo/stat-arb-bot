@@ -3574,12 +3574,48 @@ def _supervised_next_action(state: str, product: str, mode: str, days_remaining:
             f"({days_remaining} forward day(s) remaining).")
 
 
+def _dashboard_version() -> str:
+    """Read the dashboard version from frontend/package.json (best effort)."""
+    from app.config.settings import PROJECT_ROOT
+    try:
+        pkg = json.loads((PROJECT_ROOT / "frontend" / "package.json").read_text(encoding="utf-8"))
+        return str(pkg.get("version", "unknown"))
+    except Exception:  # noqa: BLE001
+        return "unknown"
+
+
+def _stamp_session_provenance(settings, store, session, *, strategy, universe, interval,
+                              sm, config, reb_every, prices) -> None:
+    """Fill the session's provenance fields once and persist them (idempotent)."""
+    from app.execution.supervised_paper import compute_config_hash
+
+    sm_repr = getattr(sm, "__dict__", sm)
+    last_bar = prices.close.index[-1]
+    last_bar_date = str(getattr(last_bar, "date", lambda: last_bar)())[:10]
+    payload = {"strategy": strategy, "universe": universe, "interval": interval,
+               "smoothing": sm_repr, "fit_window": getattr(config, "fit_window", None),
+               "reb_every": reb_every}
+    reports_dir = getattr(settings, "reports_dir", None)
+    readiness = (reports_dir / f"long_only_readiness_{strategy}_{universe}.md"
+                 if reports_dir is not None else None)
+    session.strategy_version = strategy
+    session.config_hash = compute_config_hash(payload)
+    session.data_snapshot = f"{universe}@{last_bar_date}"
+    session.dashboard_version = _dashboard_version()
+    session.readiness_report_id = (readiness.name if readiness and readiness.exists() else "")
+    store.save_session(session)
+
+
 def run_supervised_paper_daily(settings, storage, *, product: str, mode: str,
                                confirm_demo: bool = False, min_days: int = 30,
-                               starting_cash: float = 10_000.0) -> dict:
+                               starting_cash: float = 10_000.0, force: bool = False) -> dict:
     """Run the whole supervised paper daily routine for ONE day and RETURN a
     structured (JSON-serialisable) result — no console I/O. Shared by the CLI
-    command and the dashboard operator endpoints. Live is never in scope."""
+    command and the dashboard operator endpoints. Live is never in scope.
+
+    Records at most ONE forward day per calendar day: a second call on the same
+    day returns an `already_completed_today` result without recording a duplicate,
+    unless `force=True`."""
     from app.execution.paper_supervisor import (
         evaluate_stop_rules,
         health,
@@ -3596,7 +3632,8 @@ def run_supervised_paper_daily(settings, storage, *, product: str, mode: str,
     res: dict = {"product": product, "mode": mode, "refused": False, "terminal": False,
                  "refusal_reason": "", "preflight": [], "day_info": None, "stop_rules": None,
                  "state": None, "health": None, "status_line": "", "next_action": "",
-                 "summary_path": None, "session_started": None, "data_stale": False}
+                 "summary_path": None, "session_started": None, "data_stale": False,
+                 "already_completed_today": False}
 
     # --- session: auto-start if none; refuse if a stopped session is present ---
     session = store.current_session()
@@ -3612,8 +3649,24 @@ def run_supervised_paper_daily(settings, storage, *, product: str, mode: str,
                    next_action="Run `supervised-paper-start --reset` to begin a new period.")
         return res
 
-    # --- pre-flight gates (REFUSE the day if any fails) ---
     kill_active = _kill_switch_active(settings)
+
+    # --- no duplicate run for the same trading day (Phase 3) ---
+    today = utc_now().replace(tzinfo=None).date().isoformat()
+    already = any(not r.get("replay") and str(r.get("date", ""))[:10] == today
+                  for r in store.load("daily_reports"))
+    if already and not force:
+        _ok, decision_status, _ps = product_status(settings, storage, product)
+        h = health(store, settings, kill_switch_active=kill_active,
+                   decision_status=decision_status, min_days=session.min_days)
+        res.update(already_completed_today=True, state=h["state"], health=h,
+                   status_line=f"Today's paper day ({today}) is already completed — "
+                               "no duplicate recorded.",
+                   next_action=_supervised_next_action(h["state"], product, mode,
+                                                       h.get("days_remaining", 0)))
+        return res
+
+    # --- pre-flight gates (REFUSE the day if any fails) ---
     pre = preflight(settings, storage, product=product, mode=mode,
                     confirm_demo=confirm_demo, kill_switch_active=kill_active)
     res["preflight"] = [{"name": c.name, "ok": c.ok, "detail": c.detail} for c in pre.checks]
@@ -3634,6 +3687,13 @@ def run_supervised_paper_daily(settings, storage, *, product: str, mode: str,
     sm = _smoothing_config(defaults)
     fn, _ = _build_long_only(strategy, defaults, universe, interval, regime_cfg,
                              reb_every, smoothing=sm)
+
+    # --- stamp session provenance once (strategy version, config hash, snapshot) ---
+    if not session.has_provenance:
+        _stamp_session_provenance(settings, store, session, strategy=strategy,
+                                  universe=universe, interval=interval, sm=sm,
+                                  config=config, reb_every=reb_every, prices=prices)
+
     benchmarks = _load_benchmarks(storage, interval)
     book = load_paper_book(settings.runtime_dir, f"paper_{product}", session.starting_cash)
     daily_rows = store.load("daily_reports")
@@ -3701,6 +3761,8 @@ def supervised_paper_daily(
                                       help="required to submit DEMO orders in demo_execute mode"),
     min_days: int = typer.Option(30, help="min FORWARD calendar days to pass (new session only)"),
     starting_cash: float = typer.Option(10_000.0, help="starting cash (new session only)"),
+    force: bool = typer.Option(False, "--force",
+                               help="record a day even if one is already recorded today"),
 ) -> None:
     """Run the WHOLE supervised paper routine for one day (the operator command).
 
@@ -3710,16 +3772,26 @@ def supervised_paper_daily(
     (and, only in demo_execute with --confirm-demo, submits to the DEMO account);
     reconciles; computes paper / benchmark PnL, TCA and risk; updates the session
     tables; writes the daily summary; evaluates the stop rules; and prints the
-    exact next action. Live is never in scope."""
+    exact next action. Records at most one forward day per calendar day (use
+    --force to override). Live is never in scope."""
     settings, storage = _bootstrap()
     if product not in SUPERVISED_PRODUCTS:
         raise typer.BadParameter(f"unknown product {product!r}; choose {list(SUPERVISED_PRODUCTS)}")
     res = run_supervised_paper_daily(settings, storage, product=product, mode=mode,
                                      confirm_demo=confirm_demo, min_days=min_days,
-                                     starting_cash=starting_cash)
+                                     starting_cash=starting_cash, force=force)
     if res.get("session_started"):
         console.print(f"[green]Started[/green] supervised session {res['session_started']} "
                       f"({product}, mode={mode}, min_days={min_days}).")
+    if res.get("already_completed_today"):
+        state = res["state"]
+        console.print(f"[yellow]{res['status_line']}[/yellow]")
+        console.print(f"[bold]Session health:[/bold] "
+                      f"[{_STATE_COLOR.get(state, 'white')}]{state}[/]")
+        console.print(f"\n[bold]Next action:[/bold] {res['next_action']}")
+        console.print("[dim]Re-run with --force only if you must record a second day.[/dim]")
+        console.print("[bold red]NOT LIVE ELIGIBLE.[/bold red]")
+        return
     if res["preflight"]:
         console.print(f"\n[bold]Pre-flight[/bold] ({product}, mode={mode}):")
         for c in res["preflight"]:
@@ -3850,6 +3922,96 @@ def supervised_paper_start_report() -> None:
     verdict = ("Ready to begin supervised shadow/paper period" if ready else
                "NOT ready to begin supervised shadow/paper period")
     console.print(f"[{color}]{verdict}[/]")
+    console.print(f"[green]Report written:[/green] {out}")
+    console.print("[bold red]NOT LIVE ELIGIBLE.[/bold red]")
+
+
+@app.command("supervised-paper-preflight")
+def supervised_paper_preflight() -> None:
+    """Final pre-flight check before the forward paper period (Phase 1).
+
+    Verifies the product decision, the structural live-trading blocks, the broker
+    capability matrix (no CFD/short/margin/leverage), the kill switch, the
+    dashboard not-live invariant, the paper-session storage / report / audit
+    plumbing, and the presence of every readiness artifact. Writes
+    PAPER_PREFLIGHT_REPORT.md with a Ready / Not-ready verdict. Live stays blocked."""
+    settings, storage = _bootstrap()
+    from app.config.settings import PROJECT_ROOT
+    from app.research.paper_preflight import build_preflight_report
+
+    md, res = build_preflight_report(settings, storage)
+    out = PROJECT_ROOT / "PAPER_PREFLIGHT_REPORT.md"
+    out.write_text(md, encoding="utf-8")
+    console.print(f"[bold]Pre-flight checks ({sum(c.ok for c in res.checks)}/"
+                  f"{len(res.checks)} passed):[/bold]")
+    for c in res.checks:
+        mark = "PASS" if c.ok else "FAIL"
+        console.print(f"  [{'green' if c.ok else 'red'}]{mark}[/] {c.name}"
+                      + (f" [dim]({c.detail})[/dim]" if not c.ok else ""))
+    if res.ready:
+        console.print("\n[green]Ready to start supervised forward paper period.[/green]")
+    else:
+        console.print("\n[yellow]Not ready because:[/yellow] " + "; ".join(res.blockers))
+    console.print(f"[green]Report written:[/green] {out}")
+    console.print("[bold red]NOT LIVE ELIGIBLE.[/bold red]")
+
+
+@app.command("supervised-paper-weekly-report")
+def supervised_paper_weekly_report(
+    product: str = typer.Option("long_only_t212", help=" | ".join(SUPERVISED_PRODUCTS)),
+    as_of: str = typer.Option("", help="window end date YYYY-MM-DD (default: last forward day)"),
+) -> None:
+    """Weekly review of the supervised paper period (Phase 7).
+
+    Aggregates the trailing 7 calendar days and recommends continue / pause /
+    investigate / fail session. Writes runtime/paper/weekly_report_YYYY-MM-DD.md."""
+    settings, storage = _bootstrap()
+    from app.execution.supervised_paper import SupervisedPaperStore
+    from app.research.paper_weekly_report import write_weekly_report
+
+    store = SupervisedPaperStore(settings.runtime_dir, product)
+    if store.current_session() is None:
+        console.print("[yellow]No session. Run supervised-paper-start.[/yellow]")
+        raise typer.Exit(1)
+    out, rep = write_weekly_report(settings, store, storage=storage, as_of=as_of or None)
+    table = Table(title=f"Weekly paper review — {product} (as of {rep.as_of})")
+    table.add_column("metric")
+    table.add_column("value", justify="right")
+    for k, v in rep.as_dict().items():
+        if k != "warnings":
+            table.add_row(k, str(v))
+    console.print(table)
+    if rep.warnings:
+        console.print("\n[bold]Warnings[/bold]")
+        for w in rep.warnings:
+            console.print(f"  [yellow]- {w}[/yellow]")
+    rc = {"continue": "green", "investigate": "yellow",
+          "pause": "yellow", "fail session": "red"}.get(rep.recommendation, "white")
+    console.print(f"\nRecommendation: [{rc}]{rep.recommendation.upper()}[/]")
+    console.print(f"[green]Report written:[/green] {out}")
+    console.print("[bold red]NOT LIVE ELIGIBLE.[/bold red]")
+
+
+@app.command("forward-paper-start-report")
+def forward_paper_start_report() -> None:
+    """Generate FORWARD_PAPER_START_REPORT.md — the final deliverable (Phase 11).
+
+    Reads the live session state and answers whether the forward supervised paper
+    period is running, what the operator does next, what stops/pauses it, and the
+    dashboard theme support. Verdict A (started) or B (not started). Live stays
+    blocked."""
+    settings, storage = _bootstrap()
+    from app.config.settings import PROJECT_ROOT
+    from app.research.forward_paper_start_report import build_forward_start_report
+
+    md, started = build_forward_start_report(settings, storage)
+    out = PROJECT_ROOT / "FORWARD_PAPER_START_REPORT.md"
+    out.write_text(md, encoding="utf-8")
+    if started:
+        console.print("[green]A. Forward supervised paper period started successfully.[/green]")
+    else:
+        console.print("[yellow]B. Forward supervised paper period not started "
+                      "(see report for the reason).[/yellow]")
     console.print(f"[green]Report written:[/green] {out}")
     console.print("[bold red]NOT LIVE ELIGIBLE.[/bold red]")
 

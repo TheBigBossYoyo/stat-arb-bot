@@ -4,6 +4,21 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>stat-arb control panel</title>
+    <!-- Apply the stored theme before paint to avoid a flash of the wrong theme. -->
+    <script>
+      (function () {
+        try {
+          var p = localStorage.getItem("statarb.theme") || "dark";
+          var sys = window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches
+            ? "light" : "dark";
+          var r = p === "system" ? sys : p;
+          var root = document.documentElement;
+          root.classList.remove("dark", "light");
+          root.classList.add(r === "light" ? "light" : "dark");
+          root.style.colorScheme = r === "light" ? "light" : "dark";
+        } catch (e) { /* keep default dark */ }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

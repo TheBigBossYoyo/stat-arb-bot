@@ -339,8 +339,10 @@ survived stress tests and a minimum paper period.
 A full React + FastAPI command center: dashboard, portfolio, risk cockpit,
 execution monitor, strategy monitor, pair discovery, backtesting lab with
 saved-result viewer and quality warnings, broker capability matrix, logs and
-a tamper-evident audit trail. Dark-mode, WebSocket live updates with
-auto-reconnect, sortable/filterable tables with CSV export.
+a tamper-evident audit trail. **Dark and light themes** (plus a `system`
+preference that follows your OS) via a top-bar toggle that persists to
+`localStorage` and never affects trading logic or safety gates; WebSocket live
+updates with auto-reconnect; sortable/filterable tables with CSV export.
 
 ```bash
 cd frontend && npm install && npm run build && cd ..   # one-time build

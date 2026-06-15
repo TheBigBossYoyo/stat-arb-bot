@@ -1,19 +1,46 @@
-import type { ReactNode } from "react";
+import { useMemo, type ReactNode } from "react";
 import {
   Area, AreaChart, Bar, BarChart, CartesianGrid, Cell, Line, LineChart,
   ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
 import { EmptyState } from "./ui";
+import { useTheme } from "../theme/useTheme";
 
-const AXIS = { stroke: "#52525b", fontSize: 11 } as const;
-const GRID = { stroke: "#27272a", strokeDasharray: "3 3" } as const;
-const TOOLTIP = {
-  contentStyle: { background: "#18181b", border: "1px solid #3f3f46", borderRadius: 8, fontSize: 12 },
-  labelStyle: { color: "#a1a1aa" },
-  cursor: { stroke: "#3f3f46" },
-} as const;
+/** Read a CSS custom property off <html>, with a fallback for SSR/jsdom. */
+function cssVar(name: string, fallback: string): string {
+  if (typeof window === "undefined" || typeof getComputedStyle !== "function") return fallback;
+  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return v || fallback;
+}
 
-/** Shared palette so every chart pulls from the same set of accent colours. */
+/** Theme-aware chart chrome (axis/grid/tooltip). Re-reads when the theme flips. */
+export function useChartTheme() {
+  const { resolvedTheme } = useTheme();
+  return useMemo(() => {
+    const axisStroke = cssVar("--chart-axis", "#52525b");
+    const gridStroke = cssVar("--chart-grid", "#27272a");
+    const tipBg = cssVar("--chart-tooltip-bg", "#18181b");
+    const tipBorder = cssVar("--chart-tooltip-border", "#3f3f46");
+    const tipLabel = cssVar("--chart-tooltip-label", "#a1a1aa");
+    return {
+      axis: { stroke: axisStroke, fontSize: 11 },
+      grid: { stroke: gridStroke, strokeDasharray: "3 3" },
+      tooltip: {
+        contentStyle: {
+          background: tipBg, border: `1px solid ${tipBorder}`,
+          borderRadius: 8, fontSize: 12, color: cssVar("--card-foreground", "#f4f4f5"),
+        },
+        labelStyle: { color: tipLabel },
+        cursor: { stroke: tipBorder },
+      },
+    };
+    // resolvedTheme is the dependency that triggers a re-read on theme change
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resolvedTheme]);
+}
+
+/** Shared palette so every chart pulls from the same set of accent colours.
+ *  These accent hues read well on both light and dark backgrounds. */
 export const CHART_COLORS = ["#38bdf8", "#a78bfa", "#10b981", "#f59e0b", "#f472b6", "#34d399"];
 
 const shortTs = (ts: string) => String(ts).slice(5, 16);
@@ -38,6 +65,7 @@ export function ChartCard({ title, right, height = 240, empty, children }: {
 export function EquityChart({ data, height = 240 }: {
   data: { ts: string; equity: number }[]; height?: number;
 }) {
+  const { axis, grid, tooltip } = useChartTheme();
   return (
     <ResponsiveContainer width="100%" height={height}>
       <AreaChart data={data}>
@@ -47,10 +75,10 @@ export function EquityChart({ data, height = 240 }: {
             <stop offset="100%" stopColor="#10b981" stopOpacity={0} />
           </linearGradient>
         </defs>
-        <CartesianGrid {...GRID} />
-        <XAxis dataKey="ts" tickFormatter={shortTs} {...AXIS} minTickGap={60} />
-        <YAxis domain={["auto", "auto"]} {...AXIS} width={70} />
-        <Tooltip {...TOOLTIP} />
+        <CartesianGrid {...grid} />
+        <XAxis dataKey="ts" tickFormatter={shortTs} {...axis} minTickGap={60} />
+        <YAxis domain={["auto", "auto"]} {...axis} width={70} />
+        <Tooltip {...tooltip} />
         <Area type="monotone" dataKey="equity" stroke="#10b981" fill="url(#eqFill)" strokeWidth={1.5} dot={false} />
       </AreaChart>
     </ResponsiveContainer>
@@ -60,6 +88,7 @@ export function EquityChart({ data, height = 240 }: {
 export function DrawdownChart({ data, height = 180 }: {
   data: { ts: string; equity: number }[]; height?: number;
 }) {
+  const { axis, grid, tooltip } = useChartTheme();
   let peak = -Infinity;
   const dd = data.map((p) => {
     peak = Math.max(peak, p.equity);
@@ -68,10 +97,10 @@ export function DrawdownChart({ data, height = 180 }: {
   return (
     <ResponsiveContainer width="100%" height={height}>
       <AreaChart data={dd}>
-        <CartesianGrid {...GRID} />
-        <XAxis dataKey="ts" tickFormatter={shortTs} {...AXIS} minTickGap={60} />
-        <YAxis {...AXIS} width={50} tickFormatter={(v: number) => `${v.toFixed(1)}%`} />
-        <Tooltip {...TOOLTIP} formatter={(value: unknown) => [`${Number(value).toFixed(3)}%`, "drawdown"]} />
+        <CartesianGrid {...grid} />
+        <XAxis dataKey="ts" tickFormatter={shortTs} {...axis} minTickGap={60} />
+        <YAxis {...axis} width={50} tickFormatter={(v: number) => `${v.toFixed(1)}%`} />
+        <Tooltip {...tooltip} formatter={(value: unknown) => [`${Number(value).toFixed(3)}%`, "drawdown"]} />
         <Area type="monotone" dataKey="dd" stroke="#ef4444" fill="#ef444433" strokeWidth={1.5} dot={false} />
       </AreaChart>
     </ResponsiveContainer>
@@ -81,13 +110,14 @@ export function DrawdownChart({ data, height = 180 }: {
 export function ExposureChart({ data, height = 180 }: {
   data: { ts: string; gross: number; net: number }[]; height?: number;
 }) {
+  const { axis, grid, tooltip } = useChartTheme();
   return (
     <ResponsiveContainer width="100%" height={height}>
       <LineChart data={data}>
-        <CartesianGrid {...GRID} />
-        <XAxis dataKey="ts" tickFormatter={shortTs} {...AXIS} minTickGap={60} />
-        <YAxis {...AXIS} width={60} />
-        <Tooltip {...TOOLTIP} />
+        <CartesianGrid {...grid} />
+        <XAxis dataKey="ts" tickFormatter={shortTs} {...axis} minTickGap={60} />
+        <YAxis {...axis} width={60} />
+        <Tooltip {...tooltip} />
         <Line type="monotone" dataKey="gross" stroke="#38bdf8" strokeWidth={1.5} dot={false} />
         <Line type="monotone" dataKey="net" stroke="#a78bfa" strokeWidth={1.5} dot={false} />
       </LineChart>
@@ -96,14 +126,15 @@ export function ExposureChart({ data, height = 180 }: {
 }
 
 export function PnlBars({ values, height = 180 }: { values: number[]; height?: number }) {
+  const { axis, grid, tooltip } = useChartTheme();
   const data = values.map((v, i) => ({ i: i + 1, pnl: v }));
   return (
     <ResponsiveContainer width="100%" height={height}>
       <BarChart data={data}>
-        <CartesianGrid {...GRID} />
-        <XAxis dataKey="i" {...AXIS} />
-        <YAxis {...AXIS} width={50} />
-        <Tooltip {...TOOLTIP} />
+        <CartesianGrid {...grid} />
+        <XAxis dataKey="i" {...axis} />
+        <YAxis {...axis} width={50} />
+        <Tooltip {...tooltip} />
         <Bar dataKey="pnl">
           {data.map((d, i) => (
             <Cell key={i} fill={d.pnl >= 0 ? "#10b981" : "#ef4444"} />
@@ -118,6 +149,7 @@ export function PnlBars({ values, height = 180 }: { values: number[]; height?: n
 export function MiniArea({ data, color = "#38bdf8", height = 64 }: {
   data: { x: string | number; y: number }[]; color?: string; height?: number;
 }) {
+  const { tooltip } = useChartTheme();
   return (
     <ResponsiveContainer width="100%" height={height}>
       <AreaChart data={data} margin={{ top: 4, right: 4, bottom: 0, left: 4 }}>
@@ -127,7 +159,7 @@ export function MiniArea({ data, color = "#38bdf8", height = 64 }: {
             <stop offset="100%" stopColor={color} stopOpacity={0} />
           </linearGradient>
         </defs>
-        <Tooltip {...TOOLTIP} />
+        <Tooltip {...tooltip} />
         <Area type="monotone" dataKey="y" stroke={color} fill={`url(#mini-${color})`} strokeWidth={1.5} dot={false} />
       </AreaChart>
     </ResponsiveContainer>
@@ -138,13 +170,14 @@ export function MiniArea({ data, color = "#38bdf8", height = 64 }: {
 export function ContributionChart({ data, height = 220, unit = "%" }: {
   data: { label: string; value: number }[]; height?: number; unit?: string;
 }) {
+  const { axis, grid, tooltip } = useChartTheme();
   return (
     <ResponsiveContainer width="100%" height={height}>
       <BarChart data={data} layout="vertical" margin={{ left: 12, right: 16 }}>
-        <CartesianGrid {...GRID} horizontal={false} />
-        <XAxis type="number" {...AXIS} tickFormatter={(v: number) => `${v}${unit}`} />
-        <YAxis type="category" dataKey="label" {...AXIS} width={110} />
-        <Tooltip {...TOOLTIP} formatter={(v: unknown) => [`${Number(v).toFixed(2)}${unit}`, "contribution"]} />
+        <CartesianGrid {...grid} horizontal={false} />
+        <XAxis type="number" {...axis} tickFormatter={(v: number) => `${v}${unit}`} />
+        <YAxis type="category" dataKey="label" {...axis} width={110} />
+        <Tooltip {...tooltip} formatter={(v: unknown) => [`${Number(v).toFixed(2)}${unit}`, "contribution"]} />
         <Bar dataKey="value" radius={[0, 3, 3, 0]}>
           {data.map((d, i) => <Cell key={i} fill={d.value >= 0 ? "#10b981" : "#ef4444"} />)}
         </Bar>
@@ -157,13 +190,14 @@ export function ContributionChart({ data, height = 220, unit = "%" }: {
 export function ScenarioDrawdownChart({ data, height = 260, threshold = -45 }: {
   data: { scenario: string; dd: number }[]; height?: number; threshold?: number;
 }) {
+  const { axis, grid, tooltip } = useChartTheme();
   return (
     <ResponsiveContainer width="100%" height={height}>
       <BarChart data={data} margin={{ left: 4, right: 8, bottom: 24 }}>
-        <CartesianGrid {...GRID} />
-        <XAxis dataKey="scenario" {...AXIS} angle={-25} textAnchor="end" interval={0} height={60} />
-        <YAxis {...AXIS} width={50} tickFormatter={(v: number) => `${v}%`} />
-        <Tooltip {...TOOLTIP} formatter={(v: unknown) => [`${Number(v).toFixed(1)}%`, "max DD"]} />
+        <CartesianGrid {...grid} />
+        <XAxis dataKey="scenario" {...axis} angle={-25} textAnchor="end" interval={0} height={60} />
+        <YAxis {...axis} width={50} tickFormatter={(v: number) => `${v}%`} />
+        <Tooltip {...tooltip} formatter={(v: unknown) => [`${Number(v).toFixed(1)}%`, "max DD"]} />
         <Bar dataKey="dd" radius={[3, 3, 0, 0]}>
           {data.map((d, i) => (
             <Cell key={i} fill={d.dd <= threshold ? "#ef4444" : d.dd <= threshold / 1.5 ? "#f59e0b" : "#10b981"} />

@@ -89,3 +89,37 @@ def test_daily_refused_when_not_paper_candidate(synth, monkeypatch):
     res = cli.run_supervised_paper_daily(synth, None, product="long_only_t212", mode="shadow")
     assert res["refused"] is True and res["terminal"] is True
     assert "paper_candidate" in res["refusal_reason"]
+
+
+def test_daily_stamps_session_provenance(synth):
+    from app.execution.supervised_paper import SupervisedPaperStore
+    cli.run_supervised_paper_daily(synth, None, product="long_only_t212", mode="shadow")
+    sess = SupervisedPaperStore(synth.runtime_dir, "long_only_t212").current_session()
+    assert sess is not None
+    assert sess.config_hash != ""               # provenance was stamped
+    assert sess.strategy_version == "long_only_xsec_momentum"
+    assert sess.target_days == 90
+    assert sess.data_snapshot.startswith("us_stocks_50@")
+
+
+def test_daily_no_duplicate_same_day(synth):
+    from app.execution.supervised_paper import SupervisedPaperStore
+    first = cli.run_supervised_paper_daily(synth, None, product="long_only_t212", mode="shadow")
+    assert first["already_completed_today"] is False
+    second = cli.run_supervised_paper_daily(synth, None, product="long_only_t212", mode="shadow")
+    assert second["already_completed_today"] is True
+    assert second["refused"] is False
+    store = SupervisedPaperStore(synth.runtime_dir, "long_only_t212")
+    forward = [r for r in store.load("daily_reports") if not r.get("replay")]
+    assert len(forward) == 1                     # the second run recorded nothing
+
+
+def test_daily_force_overrides_duplicate_guard(synth):
+    from app.execution.supervised_paper import SupervisedPaperStore
+    cli.run_supervised_paper_daily(synth, None, product="long_only_t212", mode="shadow")
+    forced = cli.run_supervised_paper_daily(synth, None, product="long_only_t212",
+                                            mode="shadow", force=True)
+    assert forced["already_completed_today"] is False
+    store = SupervisedPaperStore(synth.runtime_dir, "long_only_t212")
+    forward = [r for r in store.load("daily_reports") if not r.get("replay")]
+    assert len(forward) == 2                     # --force recorded a second day

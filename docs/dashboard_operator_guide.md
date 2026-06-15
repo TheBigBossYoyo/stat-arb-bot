@@ -171,6 +171,49 @@ summarised on that page. Every action — including refusals — is recorded.
 
 ---
 
+## 10. Switching between dark mode and light mode
+
+The dashboard ships with a polished **dark** theme and a premium **light** theme.
+A theme toggle sits in the **top bar**, on the right next to the clock. Click it
+to cycle through three preferences:
+
+| Icon | Preference | Behaviour |
+| --- | --- | --- |
+| 🌙 moon | **Dark** | Always the dark theme (the default). |
+| ☀️ sun | **Light** | Always the light theme. |
+| 🖥️ monitor | **System** | Follows your operating system's light/dark setting, live. |
+
+- Your choice is saved in the browser's `localStorage` under the key
+  `statarb.theme`, so it persists across reloads and restarts (per browser).
+- In **System** mode the dashboard switches automatically when your OS flips
+  between light and dark.
+- The theme is applied before the page paints, so there is no flash of the wrong
+  theme on load.
+
+**The theme is purely cosmetic.** It does **not** change trading logic, the
+product decision, the stop rules, or any safety gate. In both themes the red
+**NOT LIVE ELIGIBLE** badge, an active kill switch, the live-trading banner, and
+demo-only / shadow-mode banners all stay highly visible, and danger/refused
+actions stay visually distinct. There is no "go live" control in either theme —
+the live order path does not exist.
+
+---
+
+## 11. Daily, weekly and pre-flight reports
+
+- **Pre-flight** (before you start a period): `statarb supervised-paper-preflight`
+  writes `PAPER_PREFLIGHT_REPORT.md` and prints a Ready / Not-ready verdict.
+- **Weekly** (during the period): `statarb supervised-paper-weekly-report` writes
+  `runtime/paper/weekly_report_YYYY-MM-DD.md` with a continue / pause / investigate
+  / fail recommendation. The dashboard exposes the same data at
+  `GET /api/operator/weekly-report`.
+- **Final** (after ≥30 forward days): `statarb supervised-paper-final-report`.
+
+All of these reports also appear in the dashboard **Reports Library**, which is
+fully themed in both light and dark mode.
+
+---
+
 See also: `dashboard_actions.md`, `dashboard_permissions.md`,
 `dashboard_safety_model.md`, `trading212_dashboard_workflow.md`,
 `supervised_paper_dashboard_workflow.md`.

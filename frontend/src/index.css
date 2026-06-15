@@ -1,32 +1,161 @@
 @import "tailwindcss";
 
 /*
- * Design tokens. The palette is built on Tailwind's zinc scale for surfaces and
- * a small set of semantic accents (emerald=ok, sky=info, amber=warn, red=danger,
- * violet=demo/controls). Components consume these through the shared helpers in
- * components/ui.tsx (Badge tones, Button variants) so colour usage stays
- * intentional and consistent rather than ad-hoc per page.
+ * THEME SYSTEM (dark / light / system).
+ *
+ * 1. Semantic tokens (`--background`, `--foreground`, `--card`, `--muted`,
+ *    `--border`, `--success`, `--warning`, `--danger`, `--info`, `--chart-*`)
+ *    are the intentional design surface — registered as Tailwind colours below
+ *    so `bg-card`, `text-muted-foreground`, `border-border`, `text-success`, …
+ *    all work as utilities.
+ * 2. The existing pages were built on Tailwind's `zinc` scale for surfaces and a
+ *    small set of accents (emerald/sky/amber/red/violet). Rather than rewrite
+ *    every className, LIGHT mode REMAPS those scales: the neutral ramp is
+ *    inverted (dark surfaces become light, light text becomes dark) and the
+ *    light accent text shades (200–400) are darkened for contrast on light
+ *    tints. This keeps colour usage consistent and switchable from one place.
+ * 3. `dark:` variants key off the `.dark` CLASS (not the OS query) so the few
+ *    components that need genuinely different treatment per theme (solid toasts)
+ *    can opt in explicitly.
  */
-:root {
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-border: var(--border);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
+  --color-info: var(--info);
+}
+
+/* ---------------------------------------------------------------- DARK (default) */
+:root,
+.dark {
   color-scheme: dark;
 
-  --bg-base: #09090b;        /* zinc-950 */
-  --bg-panel: #18181b;       /* zinc-900 */
-  --bg-panel-soft: #1c1c1f;
-  --border-subtle: #27272a;  /* zinc-800 */
-  --border-strong: #3f3f46;  /* zinc-700 */
+  --background: #09090b;          /* zinc-950 */
+  --foreground: #e4e4e7;          /* zinc-200 */
+  --card: #18181b;                /* zinc-900 */
+  --card-foreground: #f4f4f5;
+  --muted: #18181b;
+  --muted-foreground: #a1a1aa;    /* zinc-400 */
+  --border: #27272a;              /* zinc-800 */
+  --success: #34d399;
+  --warning: #fbbf24;
+  --danger: #f87171;
+  --info: #38bdf8;
+
+  --chart-1: #38bdf8;
+  --chart-2: #a78bfa;
+  --chart-3: #10b981;
+  --chart-4: #f59e0b;
+  --chart-5: #f472b6;
+  --chart-6: #34d399;
+
+  --chart-axis: #52525b;
+  --chart-grid: #27272a;
+  --chart-tooltip-bg: #18181b;
+  --chart-tooltip-border: #3f3f46;
+  --chart-tooltip-label: #a1a1aa;
+
+  --skeleton-from: #1f1f23;
+  --skeleton-mid: #2a2a30;
+
+  --app-glow-1: rgba(56, 189, 248, 0.05);
+  --app-glow-2: rgba(139, 92, 246, 0.05);
 
   --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4), 0 1px 1px rgba(0, 0, 0, 0.3);
   --shadow-pop: 0 10px 30px -10px rgba(0, 0, 0, 0.7), 0 2px 8px rgba(0, 0, 0, 0.5);
 }
 
+/* ---------------------------------------------------------------------- LIGHT */
+.light {
+  color-scheme: light;
+
+  --background: #f6f7f9;
+  --foreground: #1f2430;
+  --card: #ffffff;
+  --card-foreground: #111318;
+  --muted: #f1f2f5;
+  --muted-foreground: #5f636e;
+  --border: #e2e4e9;
+  --success: #059669;
+  --warning: #b45309;
+  --danger: #dc2626;
+  --info: #0284c7;
+
+  --chart-1: #0284c7;
+  --chart-2: #7c3aed;
+  --chart-3: #059669;
+  --chart-4: #d97706;
+  --chart-5: #db2777;
+  --chart-6: #0d9488;
+
+  --chart-axis: #71717a;
+  --chart-grid: #e6e7eb;
+  --chart-tooltip-bg: #ffffff;
+  --chart-tooltip-border: #d4d4d8;
+  --chart-tooltip-label: #52525b;
+
+  --skeleton-from: #e9eaee;
+  --skeleton-mid: #f3f4f7;
+
+  --app-glow-1: rgba(2, 132, 199, 0.06);
+  --app-glow-2: rgba(124, 58, 237, 0.05);
+
+  --shadow-card: 0 1px 2px rgba(24, 27, 33, 0.08), 0 1px 1px rgba(24, 27, 33, 0.04);
+  --shadow-pop: 0 12px 32px -12px rgba(24, 27, 33, 0.22), 0 2px 8px rgba(24, 27, 33, 0.10);
+
+  /* Neutral ramp — INVERTED for light mode. Surfaces (950→700) become light;
+     text shades (100→500) become dark. Tuned so muted text keeps AA contrast. */
+  --color-zinc-950: #f6f7f9;
+  --color-zinc-900: #ffffff;
+  --color-zinc-800: #e2e4e9;
+  --color-zinc-700: #d4d6dc;
+  --color-zinc-600: #71717a;
+  --color-zinc-500: #5f636e;
+  --color-zinc-400: #4b4f5a;
+  --color-zinc-300: #3a3e48;
+  --color-zinc-200: #262a32;
+  --color-zinc-100: #181b21;
+  --color-zinc-50: #0c0e12;
+
+  /* Accent TEXT shades (200–400) darkened so accent text stays readable on the
+     pale `/15`–`/20` accent tints. The 500/600/700/950 shades are unchanged so
+     tints, borders, dots and solid toasts keep their hue. */
+  --color-emerald-200: #047857;
+  --color-emerald-300: #047857;
+  --color-emerald-400: #059669;
+  --color-sky-200: #0369a1;
+  --color-sky-300: #0369a1;
+  --color-sky-400: #0284c7;
+  --color-amber-200: #b45309;
+  --color-amber-300: #b45309;
+  --color-amber-400: #d97706;
+  --color-red-200: #b91c1c;
+  --color-red-300: #b91c1c;
+  --color-red-400: #dc2626;
+  --color-violet-200: #6d28d9;
+  --color-violet-300: #6d28d9;
+  --color-violet-400: #7c3aed;
+}
+
 body {
-  @apply bg-zinc-950 text-zinc-200 antialiased;
+  background-color: var(--background);
+  color: var(--foreground);
+  @apply antialiased;
   font-family: ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
-  /* subtle depth so the dark canvas does not read as a flat black sheet */
+  /* subtle depth so neither canvas reads as a flat sheet */
   background-image:
-    radial-gradient(1200px 600px at 100% -10%, rgba(56, 189, 248, 0.05), transparent 60%),
-    radial-gradient(900px 500px at -10% 110%, rgba(139, 92, 246, 0.05), transparent 55%);
+    radial-gradient(1200px 600px at 100% -10%, var(--app-glow-1), transparent 60%),
+    radial-gradient(900px 500px at -10% 110%, var(--app-glow-2), transparent 55%);
   background-attachment: fixed;
 }
 
@@ -46,7 +175,7 @@ body {
   100% { background-position: 400px 0; }
 }
 .skeleton {
-  background: linear-gradient(90deg, #1f1f23 25%, #2a2a30 37%, #1f1f23 63%);
+  background: linear-gradient(90deg, var(--skeleton-from) 25%, var(--skeleton-mid) 37%, var(--skeleton-from) 63%);
   background-size: 800px 100%;
   animation: shimmer 1.4s ease-in-out infinite;
 }
