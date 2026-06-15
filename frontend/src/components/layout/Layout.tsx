@@ -3,36 +3,56 @@ import { NavLink } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { apiGet } from "../../lib/api";
 import type { SystemStatus } from "../../lib/types";
+import type { DashboardSummary } from "../../lib/actionTypes";
 import { useChannel } from "../../lib/ws";
 import { useUi } from "../../store/ui";
 import { Badge } from "../ui";
 import KillSwitchControl from "../KillSwitch";
 
-const NAV = [
-  { to: "/", label: "Dashboard", icon: "◧" },
-  { to: "/portfolio", label: "Portfolio", icon: "◔" },
-  { to: "/risk", label: "Risk Cockpit", icon: "⛨" },
-  { to: "/execution", label: "Execution", icon: "⇄" },
-  { to: "/strategies", label: "Strategies", icon: "ƒ" },
-  { to: "/pairs", label: "Pair Discovery", icon: "⋈" },
-  { to: "/backtests", label: "Backtesting Lab", icon: "∿" },
-  { to: "/brokers", label: "Brokers", icon: "⌁" },
-  { to: "/logs", label: "Logs & Audit", icon: "≡" },
-  { to: "/settings", label: "Settings", icon: "⚙" },
-];
+interface NavItem { to: string; label: string }
+interface NavSection { title: string; items: NavItem[] }
 
-const PRODUCT_NAV = [
-  { to: "/operator", label: "Operator Paper Mode", icon: "▶" },
-  { to: "/product-decision", label: "Product Decision", icon: "◆" },
-  { to: "/tradability", label: "Tradability", icon: "▦" },
-  { to: "/blockers", label: "Blockers", icon: "⚑" },
-  { to: "/live-readiness", label: "Live Readiness", icon: "⛔" },
-  { to: "/concentration", label: "Concentration", icon: "▤" },
-  { to: "/deflated-sharpe", label: "Deflated Sharpe", icon: "∑" },
-  { to: "/crisis-lab", label: "Crisis Lab", icon: "☇" },
-  { to: "/paper-setup", label: "T212 Paper Setup", icon: "▷" },
-  { to: "/order-preview", label: "Order Preview", icon: "⇧" },
-  { to: "/paper-monitor", label: "Paper Monitor", icon: "◷" },
+const SECTIONS: NavSection[] = [
+  { title: "Command Center", items: [
+    { to: "/", label: "Overview" },
+    { to: "/product-decision", label: "Product Decision" },
+    { to: "/tradability", label: "Tradability" },
+  ] },
+  { title: "Long-only T212", items: [
+    { to: "/readiness", label: "Readiness" },
+    { to: "/concentration", label: "Concentration" },
+    { to: "/survivorship", label: "Survivorship" },
+    { to: "/crisis-lab", label: "Crisis Lab" },
+    { to: "/order-preview", label: "Order Preview" },
+  ] },
+  { title: "Supervised Paper", items: [
+    { to: "/supervised-paper", label: "Control Center" },
+    { to: "/operator", label: "Daily Run" },
+    { to: "/paper-monitor", label: "Monitor" },
+  ] },
+  { title: "Broker", items: [
+    { to: "/t212-setup", label: "Trading 212 Setup" },
+    { to: "/brokers", label: "Account / Status" },
+  ] },
+  { title: "Risk & Safety", items: [
+    { to: "/live-readiness", label: "Live Readiness" },
+    { to: "/safety", label: "Safety Center" },
+    { to: "/blockers", label: "Blockers" },
+  ] },
+  { title: "Research", items: [
+    { to: "/reports", label: "Reports Library" },
+    { to: "/backtests", label: "Backtests" },
+    { to: "/deflated-sharpe", label: "Deflated Sharpe" },
+  ] },
+  { title: "System", items: [
+    { to: "/settings", label: "Settings" },
+    { to: "/logs", label: "Logs & Audit" },
+    { to: "/strategies", label: "Strategies" },
+    { to: "/portfolio", label: "Portfolio" },
+    { to: "/risk", label: "Risk Cockpit" },
+    { to: "/execution", label: "Execution" },
+    { to: "/pairs", label: "Pairs" },
+  ] },
 ];
 
 export default function Layout({ children }: { children: ReactNode }) {
@@ -40,6 +60,11 @@ export default function Layout({ children }: { children: ReactNode }) {
     queryKey: ["status"],
     queryFn: () => apiGet<SystemStatus>("/api/status"),
     refetchInterval: 10000,
+  });
+  const { data: summary } = useQuery({
+    queryKey: ["dashboard-summary"],
+    queryFn: () => apiGet<DashboardSummary>("/api/dashboard/summary"),
+    refetchInterval: 20000,
   });
   const live = useChannel<SystemStatus>("system");
   const status = live ?? polled;
@@ -49,43 +74,32 @@ export default function Layout({ children }: { children: ReactNode }) {
   return (
     <div className="flex h-screen overflow-hidden">
       {/* sidebar */}
-      <aside className="flex w-52 shrink-0 flex-col border-r border-zinc-800 bg-zinc-950">
+      <aside className="flex w-56 shrink-0 flex-col border-r border-zinc-800 bg-zinc-950">
         <div className="border-b border-zinc-800 px-4 py-3.5">
           <div className="text-sm font-bold tracking-wide text-zinc-100">STAT-ARB</div>
           <div className="text-[10px] uppercase tracking-widest text-zinc-500">control panel</div>
         </div>
-        <nav className="flex-1 space-y-0.5 overflow-y-auto p-2">
-          {NAV.map((item) => (
-            <NavLink
-              key={item.to}
-              to={item.to}
-              end={item.to === "/"}
-              className={({ isActive }) =>
-                `flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition ${
-                  isActive ? "bg-zinc-800 text-zinc-100" : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200"
-                }`
-              }
-            >
-              <span className="w-4 text-center text-zinc-500">{item.icon}</span>
-              {item.label}
-            </NavLink>
-          ))}
-          <div className="px-3 pb-1 pt-3 text-[10px] uppercase tracking-widest text-zinc-600">
-            Tradable product
-          </div>
-          {PRODUCT_NAV.map((item) => (
-            <NavLink
-              key={item.to}
-              to={item.to}
-              className={({ isActive }) =>
-                `flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition ${
-                  isActive ? "bg-zinc-800 text-zinc-100" : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200"
-                }`
-              }
-            >
-              <span className="w-4 text-center text-zinc-500">{item.icon}</span>
-              {item.label}
-            </NavLink>
+        <nav className="flex-1 space-y-2 overflow-y-auto p-2">
+          {SECTIONS.map((section) => (
+            <div key={section.title}>
+              <div className="px-3 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-widest text-zinc-600">
+                {section.title}
+              </div>
+              {section.items.map((item) => (
+                <NavLink
+                  key={item.to}
+                  to={item.to}
+                  end={item.to === "/"}
+                  className={({ isActive }) =>
+                    `flex items-center gap-2.5 rounded-lg px-3 py-1.5 text-sm transition ${
+                      isActive ? "bg-zinc-800 text-zinc-100" : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200"
+                    }`
+                  }
+                >
+                  {item.label}
+                </NavLink>
+              ))}
+            </div>
           ))}
         </nav>
         <div className="border-t border-zinc-800 p-3">
@@ -96,21 +110,33 @@ export default function Layout({ children }: { children: ReactNode }) {
       {/* main */}
       <div className="flex min-w-0 flex-1 flex-col">
         <ModeBanner status={status} />
-        <header className="flex items-center gap-3 border-b border-zinc-800 bg-zinc-950/80 px-4 py-2">
-          <Badge tone={status?.bot_status === "running" ? "green" : status?.bot_status === "halted" ? "red" : "gray"}>
-            bot: {status?.bot_status ?? "…"}
-          </Badge>
+        <header className="flex flex-wrap items-center gap-2 border-b border-zinc-800 bg-zinc-950/80 px-4 py-2">
+          <Badge tone="red">⛔ NOT LIVE ELIGIBLE</Badge>
+          <Badge tone={status?.mode === "live" ? "red" : "blue"}>mode: {status?.mode ?? "…"}</Badge>
           <Badge tone={status?.kill_switch.active ? "red" : "green"}>
-            kill switch: {status?.kill_switch.active ? "ACTIVE" : "off"}
+            kill: {status?.kill_switch.active ? "ON" : "off"}
           </Badge>
+          {summary && (
+            <Badge tone={summary.decision.status === "paper_candidate" ? "green" : "yellow"}>
+              {summary.decision.status}
+            </Badge>
+          )}
+          {summary && (
+            <Badge tone={summary.trading212.allow_demo_orders ? "violet" : "gray"}>
+              T212 demo: {summary.trading212.enabled ? (summary.trading212.allow_demo_orders ? "orders on" : "preview") : "off"}
+            </Badge>
+          )}
+          {summary?.health?.last_run_date && (
+            <Badge tone="gray">last paper day: {summary.health.last_run_date}</Badge>
+          )}
           <Badge tone={status?.controls_enabled ? "violet" : "gray"}>
-            {status?.controls_enabled ? "controls enabled" : "read-only"}
+            {status?.controls_enabled ? "controls" : "read-only"}
           </Badge>
           <div className="ml-auto flex items-center gap-2 text-xs text-zinc-500">
             <span className={`inline-block h-2 w-2 rounded-full ${
               wsStatus === "connected" ? "bg-emerald-500" : wsStatus === "reconnecting" ? "bg-amber-500" : "bg-zinc-600"
             }`} />
-            ws: {wsStatus}
+            {wsStatus}
             <span className="mono">{status ? new Date(status.server_time).toISOString().slice(11, 19) : ""} UTC</span>
           </div>
         </header>

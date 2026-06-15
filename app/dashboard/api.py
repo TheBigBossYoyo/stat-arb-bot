@@ -16,13 +16,17 @@ from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config.settings import PROJECT_ROOT, Settings, get_settings
 from app.core.logging import audit as audit_log
 from app.core.logging import get_logger
 from app.dashboard import websocket as ws
+from app.dashboard.action_schemas import ActionBody, ActionRequest, JobType
+from app.dashboard.actions import list_reports, report_path
 from app.dashboard.auth import check_token
+from app.dashboard.jobs import ActionOrchestrator
 from app.dashboard.permissions import Role, require_phrase, require_role
 from app.dashboard.schemas import ConfirmedAction, JobRequest
 from app.dashboard.service import DashboardService
@@ -40,6 +44,7 @@ def create_app(settings: Settings | None = None, storage: Storage | None = None,
     storage = storage or Storage(settings.database_url)
     storage.init_db()
     service = DashboardService(settings, storage)
+    orchestrator = ActionOrchestrator(settings, storage)
     manager = ws.ConnectionManager()
 
     @asynccontextmanager
@@ -544,6 +549,182 @@ def create_app(settings: Settings | None = None, storage: Storage | None = None,
         record_audit("broker_probe", True, {"broker": broker},
                      f"connected={statuses[broker].connected}")
         return statuses[broker]
+
+    # ---- action orchestrator (Phase 2/3) -------------------------------------------
+    #
+    # Every POST below funnels through orchestrator.submit(), which re-validates the
+    # role / phrase / env / kill-switch / product gates server-side and returns a job
+    # record. A blocked attempt comes back as a REFUSED job (HTTP 200) with a reason —
+    # the frontend is never trusted, and NONE of these can place a live order.
+
+    def _submit(job_type: JobType, body: ActionBody) -> dict:
+        req = ActionRequest(job_type=job_type, params=body.params,
+                            confirm_phrase=body.confirm_phrase,
+                            acknowledge=body.acknowledge, reason=body.reason)
+        return orchestrator.submit(req).public()
+
+    @app.get("/api/dashboard/capabilities", dependencies=dep)
+    def dashboard_capabilities():
+        return {"live_eligible": False, "controls_enabled": settings.dashboard_controls_enabled,
+                "role": ("admin" if settings.dashboard_controls_enabled else "viewer"),
+                "actions": orchestrator.capabilities()}
+
+    @app.get("/api/dashboard/summary", dependencies=dep)
+    def dashboard_summary(product: str = "long_only_t212"):
+        """One call powering the Command Center: product decision, paper health,
+        today's action, broker status, kill switch, latest reports + jobs."""
+        from app.cli.main import _supervised_next_action
+        from app.execution.paper_supervisor import health_for, product_status
+        from app.research.product_decision import evaluate_products
+
+        h = health_for(settings, storage, product=product)
+        _ok, decision_status, _ps = product_status(settings, storage, product)
+        d = evaluate_products(settings, storage)
+        next_action = (h.get("message") if h["state"] == "NOT STARTED" else
+                       _supervised_next_action(h["state"], product,
+                                               h.get("mode", "shadow"),
+                                               h.get("days_remaining", 0)))
+        return {
+            "live_eligible": False,
+            "controls_enabled": settings.dashboard_controls_enabled,
+            "kill_switch_active": _kill_switch_active(),
+            "product": product,
+            "decision": {"headline": d.headline, "recommended": d.recommended,
+                         "action": d.action, "capital_stage": d.capital_stage,
+                         "status": decision_status},
+            "health": h,
+            "next_action": next_action,
+            "trading212": trading212_config_view(),
+            "reports": list_reports(settings)[:8],
+            "jobs": orchestrator.list_jobs(8),
+        }
+
+    @app.get("/api/dashboard/jobs", dependencies=dep)
+    def dashboard_jobs(limit: int = 50):
+        return orchestrator.list_jobs(limit)
+
+    @app.get("/api/dashboard/jobs/{job_id}", dependencies=dep)
+    def dashboard_job(job_id: str):
+        info = orchestrator.get_job(job_id)
+        if info is None:
+            raise HTTPException(404, f"job {job_id} not found")
+        return info
+
+    @app.get("/api/dashboard/jobs/{job_id}/logs", dependencies=dep)
+    def dashboard_job_logs(job_id: str):
+        info = orchestrator.job_logs(job_id)
+        if info is None:
+            raise HTTPException(404, f"job {job_id} not found")
+        return info
+
+    @app.post("/api/dashboard/jobs/{job_id}/cancel", dependencies=dep)
+    def dashboard_job_cancel(job_id: str):
+        info = orchestrator.cancel(job_id)
+        if info is None:
+            raise HTTPException(404, f"job {job_id} not found")
+        return info
+
+    @app.post("/api/dashboard/actions", dependencies=dep)
+    def dashboard_action(body: ActionRequest):
+        return orchestrator.submit(body).public()
+
+    # -- named action endpoints (thin wrappers over the orchestrator) ----------------
+
+    @app.post("/api/product-decision/run", dependencies=dep)
+    def product_decision_run(body: ActionBody):
+        return _submit(JobType.PRODUCT_DECISION, body)
+
+    @app.post("/api/long-only/readiness/run", dependencies=dep)
+    def readiness_run(body: ActionBody):
+        return _submit(JobType.LONG_ONLY_READINESS, body)
+
+    @app.post("/api/long-only/concentration/run", dependencies=dep)
+    def concentration_run(body: ActionBody):
+        return _submit(JobType.CONCENTRATION_ANALYSIS, body)
+
+    @app.post("/api/long-only/concentration/compare-fixes", dependencies=dep)
+    def concentration_compare(body: ActionBody):
+        return _submit(JobType.COMPARE_CONCENTRATION_FIXES, body)
+
+    @app.post("/api/long-only/survivorship/run", dependencies=dep)
+    def survivorship_run(body: ActionBody):
+        return _submit(JobType.SURVIVORSHIP_STRESS, body)
+
+    @app.post("/api/long-only/crisis/run", dependencies=dep)
+    def crisis_run(body: ActionBody):
+        return _submit(JobType.CRISIS_TEST, body)
+
+    @app.post("/api/trading212/setup-check", dependencies=dep)
+    def trading212_setup_check(body: ActionBody):
+        return _submit(JobType.TRADING212_SETUP_CHECK, body)
+
+    @app.post("/api/trading212/order-preview", dependencies=dep)
+    def trading212_order_preview(body: ActionBody):
+        return _submit(JobType.ORDER_PREVIEW, body)
+
+    @app.post("/api/paper/start", dependencies=dep)
+    def paper_start(body: ActionBody):
+        return _submit(JobType.SUPERVISED_PAPER_START, body)
+
+    _DAILY_JOBS = {
+        "shadow": JobType.SUPERVISED_PAPER_DAILY_SHADOW,
+        "demo_preview": JobType.SUPERVISED_PAPER_DAILY_DEMO_PREVIEW,
+        "demo_execute": JobType.SUPERVISED_PAPER_DAILY_DEMO_EXECUTE,
+    }
+
+    @app.post("/api/paper/daily", dependencies=dep)
+    def paper_daily(body: ActionBody):
+        mode = str(body.params.get("mode", "shadow"))
+        job_type = _DAILY_JOBS.get(mode)
+        if job_type is None:
+            raise HTTPException(400, "params.mode must be shadow | demo_preview | demo_execute")
+        return _submit(job_type, body)
+
+    @app.get("/api/paper/health", dependencies=dep)
+    def paper_health(product: str = "long_only_t212", min_days: int = 30):
+        from app.execution.paper_supervisor import health_for
+        return health_for(settings, storage, product=product, min_days=min_days)
+
+    @app.post("/api/paper/final-report", dependencies=dep)
+    def paper_final_report(body: ActionBody):
+        return _submit(JobType.SUPERVISED_PAPER_FINAL_REPORT, body)
+
+    @app.post("/api/paper/stop", dependencies=dep)
+    def paper_stop(body: ActionBody):
+        return _submit(JobType.SUPERVISED_PAPER_STOP, body)
+
+    # -- kill switch via orchestrator (engage/disengage; audited + phrase-gated) ------
+
+    @app.post("/api/risk/kill-switch/engage", dependencies=dep)
+    def kill_switch_engage(body: ActionBody):
+        body.params = {**body.params, "operation": "engage"}
+        return _submit(JobType.KILL_SWITCH_ACTION, body)
+
+    @app.post("/api/risk/kill-switch/disengage", dependencies=dep)
+    def kill_switch_disengage(body: ActionBody):
+        body.params = {**body.params, "operation": "disengage"}
+        return _submit(JobType.KILL_SWITCH_ACTION, body)
+
+    # -- reports library -------------------------------------------------------------
+
+    @app.get("/api/reports", dependencies=dep)
+    def reports_list():
+        return {"reports": list_reports(settings), "live_eligible": False}
+
+    @app.get("/api/reports/{report_id}", dependencies=dep)
+    def reports_view(report_id: str):
+        p = report_path(settings, report_id)
+        if p is None or not p.exists():
+            raise HTTPException(404, f"report {report_id} not found")
+        return {"id": report_id, "name": p.name,
+                "content": p.read_text(encoding="utf-8", errors="replace")}
+
+    @app.get("/api/reports/{report_id}/download", dependencies=dep)
+    def reports_download(report_id: str):
+        p = report_path(settings, report_id)
+        if p is None or not p.exists():
+            raise HTTPException(404, f"report {report_id} not found")
+        return FileResponse(str(p), media_type="text/markdown", filename=p.name)
 
     # ---- websocket -----------------------------------------------------------------
 

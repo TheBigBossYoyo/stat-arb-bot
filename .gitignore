@@ -42,6 +42,7 @@ frontend/dist/
 
 # Runtime state
 runtime/paused_strategies.json
+runtime/dashboard_jobs.json
 
 # IDE / OS
 .idea/

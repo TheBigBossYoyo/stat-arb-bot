@@ -350,6 +350,30 @@ statarb dashboard                                       # http://127.0.0.1:8000
 Dev mode (hot reload): `statarb dashboard` in one terminal, `cd frontend &&
 npm run dev` in another → http://localhost:5173.
 
+**Primary operator control panel (no terminal for the normal loop).** The
+dashboard now drives the whole supervised-paper workflow through an audited
+action orchestrator (`app/dashboard/{actions,jobs,job_store,action_permissions,
+action_audit,action_schemas}.py`). From the browser you can:
+
+- open the **Command Center** to see today's status and the single next safe action;
+- **start a supervised paper session** and run a daily **shadow** / **demo preview**
+  / **demo execute** day, watching live job progress (Supervised Paper → Control
+  Center; `POST /api/paper/start`, `/api/paper/daily`);
+- run the **Trading 212 demo setup wizard** (`/api/trading212/setup-check`);
+- preview orders (shadow), generate the **final report**, **stop** the session;
+- rerun **product decision / concentration / survivorship / crisis / readiness**;
+- open/download every report in the **Reports Library**;
+- engage/disengage the kill switch and read the audit trail in the **Safety Center**.
+
+Demo orders need admin controls + the exact phrase `RUN DEMO PAPER DAY` +
+`TRADING212_ALLOW_DEMO_ORDERS=true`, all re-validated server-side. **Live trading
+remains impossible from the dashboard** — there is no live endpoint, button, or job
+type. Full workflow: `docs/no_terminal_required_workflow.md`. Coverage map:
+`docs/dashboard_capability_map.md`. Sprint outcome: `DASHBOARD_COMPLETION_REPORT.md`.
+
+Frontend tests: `cd frontend && npm run test:run` (Vitest + React Testing Library),
+plus `npm run typecheck` and `npm run build`.
+
 **Safety model:**
 - READ-ONLY by default. Every control endpoint (kill switch, pause strategy,
   run backtest, pair discovery) returns 403 until `DASHBOARD_CONTROLS_ENABLED=true`.
