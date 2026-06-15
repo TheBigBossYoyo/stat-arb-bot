@@ -1,12 +1,33 @@
 @import "tailwindcss";
 
+/*
+ * Design tokens. The palette is built on Tailwind's zinc scale for surfaces and
+ * a small set of semantic accents (emerald=ok, sky=info, amber=warn, red=danger,
+ * violet=demo/controls). Components consume these through the shared helpers in
+ * components/ui.tsx (Badge tones, Button variants) so colour usage stays
+ * intentional and consistent rather than ad-hoc per page.
+ */
 :root {
   color-scheme: dark;
+
+  --bg-base: #09090b;        /* zinc-950 */
+  --bg-panel: #18181b;       /* zinc-900 */
+  --bg-panel-soft: #1c1c1f;
+  --border-subtle: #27272a;  /* zinc-800 */
+  --border-strong: #3f3f46;  /* zinc-700 */
+
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4), 0 1px 1px rgba(0, 0, 0, 0.3);
+  --shadow-pop: 0 10px 30px -10px rgba(0, 0, 0, 0.7), 0 2px 8px rgba(0, 0, 0, 0.5);
 }
 
 body {
   @apply bg-zinc-950 text-zinc-200 antialiased;
   font-family: ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+  /* subtle depth so the dark canvas does not read as a flat black sheet */
+  background-image:
+    radial-gradient(1200px 600px at 100% -10%, rgba(56, 189, 248, 0.05), transparent 60%),
+    radial-gradient(900px 500px at -10% 110%, rgba(139, 92, 246, 0.05), transparent 55%);
+  background-attachment: fixed;
 }
 
 ::-webkit-scrollbar { width: 10px; height: 10px; }
@@ -15,3 +36,27 @@ body {
 ::-webkit-scrollbar-thumb:hover { @apply bg-zinc-700; }
 
 .mono { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; }
+
+/* Shared elevation + motion utilities used across the design system. */
+.card-elevated { box-shadow: var(--shadow-card); }
+.pop-elevated { box-shadow: var(--shadow-pop); }
+
+@keyframes shimmer {
+  0% { background-position: -400px 0; }
+  100% { background-position: 400px 0; }
+}
+.skeleton {
+  background: linear-gradient(90deg, #1f1f23 25%, #2a2a30 37%, #1f1f23 63%);
+  background-size: 800px 100%;
+  animation: shimmer 1.4s ease-in-out infinite;
+}
+
+@keyframes fade-in-up {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.fade-in { animation: fade-in-up 0.18s ease-out both; }
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton, .fade-in { animation: none; }
+}

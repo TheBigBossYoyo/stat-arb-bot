@@ -92,14 +92,21 @@ def _h_trading212_setup_check(ctx: ActionContext) -> dict[str, Any]:
 
 
 def _h_order_preview(ctx: ActionContext) -> dict[str, Any]:
-    """SHADOW order preview — connects to no broker, sends nothing."""
+    """Order PREVIEW — builds the validated long-only plan but connects to no
+    broker and sends NOTHING. Both `shadow` and `demo_preview` here are offline
+    previews: real demo execution only ever happens inside the gated supervised
+    paper daily run. This is the operator's "what would happen today" view."""
     from app.brokers.trading212.instrument_cache import (
         InstrumentCache,
         synthetic_instruments,
     )
     from app.cli.main import _latest_long_only_weights
-    from app.execution.long_only_order_planner import LongOnlyOrderPlanner
+    from app.execution.long_only_order_planner import (
+        LongOnlyOrderPlanner,
+        expected_slippage_bps,
+    )
 
+    mode = str(ctx.params.get("mode", "shadow"))
     strategy, universe = ctx.strategy(), ctx.universe()
     starting_cash = float(ctx.params.get("starting_cash", 10_000.0))
     ctx.progress(0.4, "loading latest target weights")
@@ -107,12 +114,29 @@ def _h_order_preview(ctx: ActionContext) -> dict[str, Any]:
         ctx.storage, strategy, universe, ctx.interval())
     planner = LongOnlyOrderPlanner(InstrumentCache(synthetic_instruments(symbols)))
     planned = planner.plan(weights, {}, starting_cash, prices_t, market_open=False)
+    demo_ready = bool(ctx.settings.trading212_enabled
+                      and ctx.settings.trading212_mode == "demo"
+                      and ctx.settings.trading212_allow_demo_orders)
     ctx.progress(1.0, "done")
-    return {"banner": "SHADOW MODE — SENDS NO ORDERS", "live_eligible": False,
-            "orders": planned.order_rows(), "summary": planned.summary(),
-            "validation": {"ok": planned.validation.ok,
-                           "checks": planned.validation.checks,
-                           "issues": planned.validation.order_issues}}
+    return {
+        "banner": ("SHADOW MODE — SENDS NO ORDERS" if mode == "shadow"
+                   else "DEMO PREVIEW (offline) — validates the plan, contacts no broker, sends nothing"),
+        "mode": mode, "live_eligible": False,
+        "orders": planned.order_rows(),
+        "skipped": [list(s) for s in planned.plan.skipped],
+        "target_weights": [{"symbol": s, "weight": round(w, 4)}
+                           for s, w in sorted(planned.target_weights.items(),
+                                              key=lambda kv: -kv[1]) if w > 0],
+        "summary": {**planned.summary(),
+                    "expected_slippage_bps": round(expected_slippage_bps(planned.plan), 2)},
+        "validation": {"ok": planned.validation.ok,
+                       "checks": planned.validation.checks,
+                       "issues": planned.validation.order_issues},
+        "demo_eligible": demo_ready,
+        "demo_note": ("demo orders are configured — but are only ever sent inside the gated "
+                      "supervised paper daily run" if demo_ready
+                      else "demo orders are not enabled — this is preview only"),
+    }
 
 
 def _h_supervised_paper_start(ctx: ActionContext) -> dict[str, Any]:

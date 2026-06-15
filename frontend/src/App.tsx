@@ -16,6 +16,7 @@ import ProductDecisionPage from "./pages/ProductDecisionPage";
 import TradabilityMatrixPage from "./pages/TradabilityMatrixPage";
 import BlockersPage from "./pages/BlockersPage";
 import LiveReadinessPage from "./pages/LiveReadinessPage";
+import ReadinessPage from "./pages/ReadinessPage";
 import ConcentrationDiagnosticsPage from "./pages/ConcentrationDiagnosticsPage";
 import DeflatedSharpePage from "./pages/DeflatedSharpePage";
 import CrisisLabPage from "./pages/CrisisLabPage";
@@ -39,7 +40,7 @@ export default function App() {
         <Route path="/tradability" element={<TradabilityMatrixPage />} />
 
         {/* Long-only T212 */}
-        <Route path="/readiness" element={<LiveReadinessPage />} />
+        <Route path="/readiness" element={<ReadinessPage />} />
         <Route path="/concentration" element={<ConcentrationDiagnosticsPage />} />
         <Route path="/survivorship" element={<SurvivorshipPage />} />
         <Route path="/crisis-lab" element={<CrisisLabPage />} />

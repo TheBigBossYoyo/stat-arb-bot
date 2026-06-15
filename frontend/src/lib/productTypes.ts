@@ -93,6 +93,25 @@ export interface OrderPreview {
   error?: string;
 }
 
+/** Result payload of the ORDER_PREVIEW action (job.result). Sends nothing. */
+export interface OrderPreviewResult {
+  banner: string;
+  mode: string;
+  live_eligible: boolean;
+  orders: OrderPreviewRow[];
+  skipped: [string, string][];
+  target_weights: { symbol: string; weight: number }[];
+  summary: {
+    n_orders: number; n_buys: number; n_sells: number;
+    buy_notional: number; sell_notional: number; n_skipped: number;
+    cash_before: number; cash_after: number; expected_slippage_bps: number;
+    market_open?: boolean; validated?: boolean;
+  };
+  validation: { ok: boolean; checks: Record<string, boolean>; issues: [string, string][] };
+  demo_eligible: boolean;
+  demo_note: string;
+}
+
 export interface PaperStatus {
   active: boolean;
   message?: string;

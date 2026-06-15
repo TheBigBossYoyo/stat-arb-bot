@@ -3,11 +3,11 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiGet } from "../lib/api";
 import type { OperatorStatus } from "../lib/productTypes";
 import { useAction } from "../lib/useAction";
-import { Card, Badge, Button, EmptyState, Field, inputCls } from "../components/ui";
+import { Card, Badge, Button, EmptyState, Field, inputCls, PageHeader } from "../components/ui";
 import MetricCard from "../components/MetricCard";
 import JobProgress from "../components/JobProgress";
 import ConfirmModal from "../components/ConfirmModal";
-import { NotLiveBanner, DemoOnlyBanner, PageTitle, Loader } from "../components/Banners";
+import { DemoOnlyBanner, Loader } from "../components/Banners";
 import { fmtPct } from "../lib/formatters";
 
 const PRODUCT = "long_only_t212";
@@ -42,8 +42,11 @@ export default function SupervisedPaperPage() {
 
   return (
     <div className="space-y-4">
-      <PageTitle title="Supervised Paper — Control Center" subtitle="Start, run, monitor and close the long-only Trading 212 supervised paper period." />
-      <NotLiveBanner />
+      <PageHeader
+        title="Supervised Paper — Control Center"
+        description="Start, run, monitor and close the long-only Trading 212 supervised paper period. There is no live path — every mode is paper or demo and re-validated server-side."
+        badges={<Badge tone="red" dot>NOT LIVE ELIGIBLE</Badge>}
+      />
 
       <Loader data={status.data} error={status.error} isLoading={status.isLoading}>
         {(s) => {
